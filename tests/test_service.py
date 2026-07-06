@@ -36,6 +36,9 @@ def _reset_config(monkeypatch, tmp_path):
         "ANYSEARCH_API_KEY",
         "ANYSEARCH_API_URL",
         "ANYSEARCH_TIMEOUT_SECONDS",
+        "SCIVERSE_API_TOKEN",
+        "SCIVERSE_API_URL",
+        "SCIVERSE_TIMEOUT_SECONDS",
         "ZHIPU_API_KEY",
         "ZHIPU_API_URL",
         "ZHIPU_SEARCH_ENGINE",
@@ -305,6 +308,26 @@ def test_anysearch_config_defaults_and_saved_values(monkeypatch, tmp_path):
     assert service.config.anysearch_api_url == "https://anysearch.example.com/mcp"
     assert service.config.anysearch_api_key == "as-test-secret"
     assert service.config.anysearch_timeout == 9.0
+
+
+def test_sciverse_config_defaults_and_saved_values_are_masked(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    assert service.config.sciverse_api_url == "https://api.sciverse.space"
+    assert service.config.sciverse_api_token is None
+    assert service.config.sciverse_timeout == 30.0
+
+    service.config_set("SCIVERSE_API_URL", "https://sciverse.example.com")
+    service.config_set("SCIVERSE_API_TOKEN", "sciverse-test-secret")
+    service.config_set("SCIVERSE_TIMEOUT_SECONDS", "9")
+
+    info = service.config_list(show_secrets=False)["values"]
+
+    assert service.config.sciverse_api_url == "https://sciverse.example.com"
+    assert service.config.sciverse_api_token == "sciverse-test-secret"
+    assert service.config.sciverse_timeout == 9.0
+    assert info["SCIVERSE_API_TOKEN"] != "sciverse-test-secret"
+    assert info["SCIVERSE_API_TOKEN"].startswith("sciv")
 
 
 def test_jina_and_zhipu_mcp_config_defaults_and_saved_values(monkeypatch, tmp_path):
@@ -1197,6 +1220,34 @@ def test_anysearch_vertical_status_is_experimental_and_not_minimum_required(monk
     assert with_anysearch["capability_status"]["vertical_search"]["configured"] == ["anysearch"]
 
 
+def test_sciverse_vertical_status_is_explicit_only_and_not_default_route(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("SMART_SEARCH_MINIMUM_PROFILE", "standard")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("SCIVERSE_API_TOKEN", "sciverse-test-secret")
+    monkeypatch.delenv("ANYSEARCH_API_KEY", raising=False)
+
+    result = service.validate_minimum_profile()
+    routes = service._research_capability_routes(
+        "CVE structured vertical search",
+        {"intent_signals": {}},
+        "auto",
+        capability_status=result["capability_status"],
+    )
+
+    assert result["ok"] is True
+    assert result["required"] == ["main_search", "docs_search", "web_fetch"]
+    vertical_status = result["capability_status"]["vertical_search"]
+    assert vertical_status["configured"] == ["sciverse"]
+    assert vertical_status["explicit_only"] == ["sciverse"]
+    assert vertical_status["route_enabled"]["sciverse"] is False
+    assert routes["signals"]["vertical_intent"] is True
+    assert routes["capabilities"]["vertical_search"]["providers"] == []
+
+
 def test_jina_key_satisfies_web_fetch_but_anonymous_jina_does_not(monkeypatch):
     monkeypatch.setenv("SMART_SEARCH_MINIMUM_PROFILE", "standard")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
@@ -1872,6 +1923,106 @@ async def test_anysearch_service_parse_error(monkeypatch):
     assert result["ok"] is False
     assert result["error_type"] == "parse_error"
     assert result["provider"] == "anysearch"
+
+
+@pytest.mark.asyncio
+async def test_sciverse_service_wrappers_decode_provider_json(monkeypatch):
+    calls = []
+
+    class FakeSciverseProvider:
+        def __init__(self, api_url, api_token, timeout):
+            calls.append(("init", api_url, api_token, timeout))
+
+        async def list_catalog(self, collection="papers", include_sample_values=False, include_field_stats=False):
+            calls.append(("catalog", collection, include_sample_values, include_field_stats))
+            return json.dumps({"ok": True, "provider": "sciverse", "tool": "list_catalog", "fields": []})
+
+        async def search_papers(self, **kwargs):
+            calls.append(("search", kwargs))
+            return json.dumps({"ok": True, "provider": "sciverse", "tool": "search_papers", "query": kwargs.get("query")})
+
+        async def semantic_search(self, query, top_k=10, mode="balanced", source_types=None):
+            calls.append(("semantic", query, top_k, mode, source_types))
+            return json.dumps({"ok": True, "provider": "sciverse", "tool": "semantic_search", "query": query})
+
+        async def read_content(self, doc_id, offset=0, limit=4096):
+            calls.append(("read", doc_id, offset, limit))
+            return json.dumps({"ok": True, "provider": "sciverse", "tool": "read_content", "doc_id": doc_id})
+
+        async def list_paper_relations(self, unique_id, relation="CITATIONS", page=1, page_size=25):
+            calls.append(("relations", unique_id, relation, page, page_size))
+            return json.dumps({"ok": True, "provider": "sciverse", "tool": "list_paper_relations", "unique_id": unique_id})
+
+    monkeypatch.setenv("SCIVERSE_API_URL", "https://sciverse.example.com")
+    monkeypatch.setenv("SCIVERSE_API_TOKEN", "sciverse-test-secret")
+    monkeypatch.setenv("SCIVERSE_TIMEOUT_SECONDS", "7")
+    monkeypatch.setattr(service, "SciverseProvider", FakeSciverseProvider)
+
+    catalog = await service.sciverse_catalog(collection="papers", include_sample_values=True)
+    search = await service.sciverse_search(
+        "transformer retrieval",
+        year_from=2020,
+        filters_advanced=[{"field": "year", "op": ">=", "value": 2020}],
+        page_size=5,
+    )
+    semantic = await service.sciverse_semantic("attention mechanism", top_k=3, mode="balanced", source_types=["paper"])
+    read = await service.sciverse_read("doc-1", offset=10, limit=100)
+    relations = await service.sciverse_relations("paper-1", relation="REFERENCES", page=2, page_size=25)
+
+    assert catalog["tool"] == "list_catalog"
+    assert search["query"] == "transformer retrieval"
+    assert semantic["query"] == "attention mechanism"
+    assert read["doc_id"] == "doc-1"
+    assert relations["unique_id"] == "paper-1"
+    assert calls == [
+        ("init", "https://sciverse.example.com", "sciverse-test-secret", 7.0),
+        ("catalog", "papers", True, False),
+        ("init", "https://sciverse.example.com", "sciverse-test-secret", 7.0),
+        (
+            "search",
+            {
+                "query": "transformer retrieval",
+                "collection": "papers",
+                "title_contains": "",
+                "abstract_contains": "",
+                "authors": None,
+                "journals": None,
+                "subjects": None,
+                "year_from": 2020,
+                "year_to": None,
+                "filters_advanced": [{"field": "year", "op": ">=", "value": 2020}],
+                "sort_advanced": None,
+                "sort_by_year": "desc",
+                "freshness_boost": "NONE",
+                "page": 1,
+                "page_size": 5,
+            },
+        ),
+        ("init", "https://sciverse.example.com", "sciverse-test-secret", 7.0),
+        ("semantic", "attention mechanism", 3, "balanced", ["paper"]),
+        ("init", "https://sciverse.example.com", "sciverse-test-secret", 7.0),
+        ("read", "doc-1", 10, 100),
+        ("init", "https://sciverse.example.com", "sciverse-test-secret", 7.0),
+        ("relations", "paper-1", "REFERENCES", 2, 25),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sciverse_service_parse_error(monkeypatch):
+    class FakeSciverseProvider:
+        def __init__(self, api_url, api_token, timeout):
+            pass
+
+        async def list_catalog(self, collection="papers", include_sample_values=False, include_field_stats=False):
+            return "not json"
+
+    monkeypatch.setattr(service, "SciverseProvider", FakeSciverseProvider)
+
+    result = await service.sciverse_catalog()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "parse_error"
+    assert result["provider"] == "sciverse"
 
 
 @pytest.mark.asyncio

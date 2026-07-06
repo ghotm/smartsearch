@@ -81,6 +81,41 @@ smart-search anysearch-extract URL [--max-length N] --format json|markdown|conte
 smart-search anysearch-batch QUERY...
   [--max-results N]
   [--format json|markdown|content]
+smart-search sciverse-catalog
+  [--collection papers|authors|sources]
+  [--include-sample-values]
+  [--include-field-stats]
+  [--format json|markdown|content]
+smart-search sciverse-search [QUERY]
+  [--collection papers|authors|sources]
+  [--title-contains TEXT]
+  [--abstract-contains TEXT]
+  [--authors CSV]
+  [--journals CSV]
+  [--subjects CSV]
+  [--year-from YEAR]
+  [--year-to YEAR]
+  [--filters-advanced JSON_ARRAY]
+  [--sort-advanced JSON_ARRAY]
+  [--sort-by-year desc|asc|none]
+  [--freshness-boost NONE|MILD|STRONG]
+  [--page N]
+  [--page-size N]
+  [--format json|markdown|content]
+smart-search sciverse-semantic QUERY
+  [--top-k N]
+  [--mode fast|balanced|quality]
+  [--source-types CSV]
+  [--format json|markdown|content]
+smart-search sciverse-read DOC_ID
+  [--offset N]
+  [--limit N]
+  [--format json|markdown|content]
+smart-search sciverse-relations UNIQUE_ID
+  [--relation CITATIONS|REFERENCES|RELATED_WORKS]
+  [--page N]
+  [--page-size N]
+  [--format json|markdown|content]
 smart-search context7-library NAME [--query QUERY] --format json|markdown|content
 smart-search context7-docs LIBRARY_ID [--query QUERY] --format json|markdown|content
 ```
@@ -115,7 +150,7 @@ Capabilities:
 | `web_search` | `zhipu`, `zhipu-mcp`, `tavily`, `firecrawl` | General web-source reinforcement |
 | `docs_search` | `context7`, `exa` by intent | Documentation, SDK, API, library, and framework lookup |
 | `web_fetch` | `tavily`, `jina`, `zhipu-mcp-reader`, `firecrawl` | Known URL content extraction |
-| `vertical_search` | `anysearch` | Experimental structured/vertical search evidence |
+| `vertical_search` | `anysearch`; `sciverse` is explicit-only and route-disabled in v1 | Experimental structured/vertical search evidence |
 | `synthesis` | currently successful `main_search` provider | Final answer synthesis |
 
 Deep Research planner orchestration:
@@ -186,7 +221,9 @@ Deep Research planner orchestration:
   searches; Zhipu MCP only as the separate Coding Plan quota route; Tavily for
   broad discovery and site maps; Jina for known public URL/PDF/arXiv clean
   extraction; Firecrawl for JS-heavy/dynamic/browser-like/OCR/PDF/structured
-  extraction fallback; AnySearch only when vertical intent is clear.
+  extraction fallback; AnySearch only when vertical intent is clear; Sciverse
+  remains explicit-only for academic catalog/search/semantic/read/relations and
+  must not participate in default `research` fallback.
 - Research final synthesis receives only fetched/read evidence and structured
   source metadata. It must not call web providers again and must not cite
   unfetched discovery candidates as proof. If evidence cannot close, return a
@@ -232,6 +269,15 @@ Provider configuration:
   `Authorization: Bearer <key>`; when absent, requests are anonymous.
 - `ANYSEARCH_TIMEOUT_SECONDS` configures the AnySearch HTTP timeout and
   defaults to `30`.
+- `SCIVERSE_API_TOKEN` configures the explicit experimental Sciverse academic
+  provider. It is required for every `sciverse-*` command; when absent, commands
+  must return `error_type=config_error` without sending a network request.
+- `SCIVERSE_API_URL` defaults to `https://api.sciverse.space`.
+- `SCIVERSE_TIMEOUT_SECONDS` configures Sciverse HTTP timeout and defaults to
+  `30`.
+- Sciverse uses native HTTP/OpenAPI endpoints: `GET /meta-catalog`,
+  `POST /meta-search`, `POST /agentic-search`, `GET /content`, and
+  `POST /meta-paper-relations`.
 - `ZHIPU_API_KEY` registers the `zhipu` web-search provider.
 - `ZHIPU_API_URL` configures the Zhipu Web Search API base URL. It defaults to
   `https://open.bigmodel.cn/api` and is independent of `TAVILY_API_URL`.
@@ -387,6 +433,30 @@ AnySearch boundary:
   discarded.
 - `anysearch-batch` accepts at most five queries. Reject larger batches before
   sending a network request.
+
+Sciverse boundary:
+
+- Sciverse is an experimental `vertical_search` provider exposed only through
+  explicit `sciverse-*` CLI commands and capability diagnostics.
+- Do not insert Sciverse into `docs_search`, `web_search`, `web_fetch`,
+  `main_search`, default `smart-search search`, or default `smart-search
+  research` without a separate acceptance/routing task.
+- Sciverse is not required by and must not satisfy the `standard` minimum
+  profile.
+- `sciverse-catalog` calls `list_catalog`; `sciverse-search` calls
+  `search_papers`; `sciverse-semantic` calls `semantic_search`;
+  `sciverse-read` calls `read_content`; `sciverse-relations` calls
+  `list_paper_relations`.
+- `sciverse-read` uses `doc_id`. `sciverse-relations` uses `unique_id`.
+- Relation direction must stay explicit: `CITATIONS` means papers citing the
+  target paper, `REFERENCES` means papers cited by the target paper, and
+  `RELATED_WORKS` means related work suggestions.
+- Local parameter limits: search `page_size <= 50`, semantic `top_k <= 30`,
+  read `limit <= 16384`, relations `page_size <= 200`; violations return
+  `error_type=parameter_error` before network.
+- HTTP errors map as: 400 `parameter_error`, 401/403 `auth_error`, 404
+  `provider_error`, 429 `rate_limited`, 502/503/network `network_error`,
+  timeout `timeout`, and invalid JSON `parse_error`.
 
 Interactive setup contract:
 
@@ -870,6 +940,16 @@ When this contract changes, add or update tests that assert:
 - AnySearch JSON-RPC success, `result.isError=true`, JSON-RPC error, HTTP
   error, timeout, anonymous request, authenticated header, raw markdown parsing,
   structured evidence without URL, and batch limit are covered;
+- Sciverse config keys are listed, settable, masked where secret, and optional
+  for the `standard` minimum profile;
+- Sciverse capability status is `vertical_search`, `experimental=true`,
+  `explicit_only`, route-disabled for default routing, and does not change
+  required minimum capabilities;
+- Sciverse mock calls cover catalog, search, semantic, read, relations, missing
+  token no-network behavior, Bearer auth, local bounds, relation enum, HTTP
+  error mapping, timeout, invalid JSON, and CLI advanced JSON validation;
+- default `search` / `research` provider attempts never contain `sciverse`
+  unless a future routing task explicitly changes this contract;
 - `doctor()` tests configured main providers independently;
 - general queries do not call docs providers;
 - docs queries use Exa before Context7;

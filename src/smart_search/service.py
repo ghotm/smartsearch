@@ -37,6 +37,7 @@ from .providers.context7 import Context7Provider
 from .providers.exa import ExaSearchProvider
 from .providers.jina import JinaReaderProvider
 from .providers.openai_compatible import OpenAICompatibleSearchProvider, get_local_time_info
+from .providers.sciverse import SciverseProvider
 from .providers.xai_responses import XAIResponsesSearchProvider
 from .providers.zhipu import ZhipuWebSearchProvider
 from .providers.zhipu_mcp import ZhipuMCPProvider
@@ -267,6 +268,18 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
         "quality_filters": ["vertical intent required", "URL required before evidence citation"],
         "route_reasons": ["vertical domain discovery"],
         "experimental": True,
+    },
+    "sciverse": {
+        "capability": "vertical_search",
+        "strengths": ["academic literature", "semantic paper search", "citation relations", "paper content snippets"],
+        "exclusions": ["generic default fallback", "standard minimum profile", "docs_search"],
+        "fallback_group": "vertical_search",
+        "minimum_profile_role": "",
+        "quality_filters": ["explicit command required", "unique_id required for relations", "doc_id required for content"],
+        "route_reasons": ["explicit academic vertical search"],
+        "experimental": True,
+        "explicit_only": True,
+        "route_enabled": False,
     },
     "main-search": {
         "capability": "synthesis",
@@ -676,6 +689,8 @@ def _provider_configured(provider: str) -> bool:
         return bool(config.firecrawl_api_key)
     if provider == "anysearch":
         return bool(config.anysearch_api_key)
+    if provider == "sciverse":
+        return bool(config.sciverse_api_token)
     if provider == "main-search":
         return bool(config.xai_api_key or (config.openai_compatible_api_url and config.openai_compatible_api_key))
     return False
@@ -1582,9 +1597,18 @@ def get_capability_status() -> dict[str, Any]:
             "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"],
         },
         "vertical_search": {
-            "configured": ["anysearch"] if config.anysearch_api_key else [],
+            "configured": [
+                name
+                for name, enabled in [
+                    ("anysearch", bool(config.anysearch_api_key)),
+                    ("sciverse", bool(config.sciverse_api_token)),
+                ]
+                if enabled
+            ],
             "fallback_chain": ["anysearch"],
             "experimental": True,
+            "explicit_only": ["sciverse"],
+            "route_enabled": {"anysearch": True, "sciverse": False},
         },
     }
     for capability in ("web_search", "docs_search", "web_fetch", "vertical_search"):
@@ -3123,6 +3147,10 @@ def _anysearch_provider() -> AnySearchProvider:
     return AnySearchProvider(config.anysearch_api_url, config.anysearch_api_key, config.anysearch_timeout)
 
 
+def _sciverse_provider() -> SciverseProvider:
+    return SciverseProvider(config.sciverse_api_url, config.sciverse_api_token, config.sciverse_timeout)
+
+
 async def _decode_provider_json(raw: str, provider: str = "anysearch") -> dict[str, Any]:
     try:
         return json.loads(raw)
@@ -3158,6 +3186,96 @@ async def anysearch_extract(url: str, max_length: int = 20000) -> dict[str, Any]
 
 async def anysearch_batch(queries: list[str], max_results: int = 3) -> dict[str, Any]:
     return await _decode_provider_json(await _anysearch_provider().batch_search(queries, max_results=max_results))
+
+
+async def sciverse_catalog(
+    collection: str = "papers",
+    include_sample_values: bool = False,
+    include_field_stats: bool = False,
+) -> dict[str, Any]:
+    return await _decode_provider_json(
+        await _sciverse_provider().list_catalog(
+            collection=collection,
+            include_sample_values=include_sample_values,
+            include_field_stats=include_field_stats,
+        ),
+        provider="sciverse",
+    )
+
+
+async def sciverse_search(
+    query: str = "",
+    collection: str = "papers",
+    title_contains: str = "",
+    abstract_contains: str = "",
+    authors: list[str] | str | None = None,
+    journals: list[str] | str | None = None,
+    subjects: list[str] | str | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    filters_advanced: list[dict[str, Any]] | None = None,
+    sort_advanced: list[dict[str, Any]] | None = None,
+    sort_by_year: str = "desc",
+    freshness_boost: str = "NONE",
+    page: int = 1,
+    page_size: int = 10,
+) -> dict[str, Any]:
+    return await _decode_provider_json(
+        await _sciverse_provider().search_papers(
+            query=query,
+            collection=collection,
+            title_contains=title_contains,
+            abstract_contains=abstract_contains,
+            authors=authors,
+            journals=journals,
+            subjects=subjects,
+            year_from=year_from,
+            year_to=year_to,
+            filters_advanced=filters_advanced,
+            sort_advanced=sort_advanced,
+            sort_by_year=sort_by_year,
+            freshness_boost=freshness_boost,
+            page=page,
+            page_size=page_size,
+        ),
+        provider="sciverse",
+    )
+
+
+async def sciverse_semantic(
+    query: str,
+    top_k: int = 10,
+    mode: str = "balanced",
+    source_types: list[str] | str | None = None,
+) -> dict[str, Any]:
+    return await _decode_provider_json(
+        await _sciverse_provider().semantic_search(query=query, top_k=top_k, mode=mode, source_types=source_types),
+        provider="sciverse",
+    )
+
+
+async def sciverse_read(doc_id: str, offset: int = 0, limit: int = 4096) -> dict[str, Any]:
+    return await _decode_provider_json(
+        await _sciverse_provider().read_content(doc_id=doc_id, offset=offset, limit=limit),
+        provider="sciverse",
+    )
+
+
+async def sciverse_relations(
+    unique_id: str,
+    relation: str = "CITATIONS",
+    page: int = 1,
+    page_size: int = 25,
+) -> dict[str, Any]:
+    return await _decode_provider_json(
+        await _sciverse_provider().list_paper_relations(
+            unique_id=unique_id,
+            relation=relation,
+            page=page,
+            page_size=page_size,
+        ),
+        provider="sciverse",
+    )
 
 
 def _zhipu_mcp_search_provider() -> ZhipuMCPProvider:
@@ -3960,7 +4078,14 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
         "web_search": {"configured": ["zhipu"], "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"], "ok": True},
         "docs_search": {"configured": ["context7"], "fallback_chain": ["context7", "exa"], "ok": True},
         "web_fetch": {"configured": ["tavily"], "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"], "ok": True},
-        "vertical_search": {"configured": [], "fallback_chain": ["anysearch"], "ok": False, "experimental": True},
+        "vertical_search": {
+            "configured": [],
+            "fallback_chain": ["anysearch"],
+            "ok": False,
+            "experimental": True,
+            "explicit_only": ["sciverse"],
+            "route_enabled": {"anysearch": True, "sciverse": False},
+        },
     }
     minimum = _minimum_profile_result("standard", minimum_status)
     cases.append(
@@ -4185,7 +4310,14 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
             "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"],
             "ok": True,
         },
-        "vertical_search": {"configured": ["anysearch"], "fallback_chain": ["anysearch"], "ok": True, "experimental": True},
+        "vertical_search": {
+            "configured": ["anysearch"],
+            "fallback_chain": ["anysearch"],
+            "ok": True,
+            "experimental": True,
+            "explicit_only": ["sciverse"],
+            "route_enabled": {"anysearch": True, "sciverse": False},
+        },
     }
     docs_routes = _research_capability_routes("React useEffect API docs", docs_plan, "auto", capability_status=mock_research_status)
     zh_routes = _research_capability_routes("今天国内 AI 政策最新公告", market_plan, "auto", capability_status=mock_research_status)

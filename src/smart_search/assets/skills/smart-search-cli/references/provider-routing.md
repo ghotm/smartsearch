@@ -51,6 +51,7 @@ Intent router rules:
 - Chat Completions mode must not send xAI `web_search` / `x_search` tools or legacy `search_parameters`; xAI Chat Completions Live Search is deprecated.
 - The standard minimum profile requires one configured provider in each of `main_search`, `docs_search`, and fetch capability. Missing required capabilities should be treated as a hard configuration failure.
 - AnySearch is reported only as optional experimental `vertical_search`; it is not part of the `web_search` fallback and is not required by the `standard` minimum profile.
+- Sciverse is reported only as optional experimental explicit-only `vertical_search`; it is not `docs_search`, not part of default `search` / `research` fallback, and not required by the `standard` minimum profile.
 - Jina Reader is `web_fetch` only, not a general search provider. `JINA_API_KEY` is required before Jina satisfies the standard minimum profile; anonymous `r.jina.ai` is explicit/experimental fetch behavior.
 - Same-capability fallback is allowed; cross-capability fallback is not. Context7 is not used for unrelated broad web queries, and page extraction providers are not used as docs search providers.
 - `main_search`: xAI Responses first for Grok/xAI, then OpenAI-compatible answer fallback when that peer provider is separately configured and `--fallback auto` is active.
@@ -65,6 +66,7 @@ Intent router rules:
 - `exa-search` and `exa-similar` use Exa only.
 - `context7-library` and `context7-docs` use Context7 only.
 - `anysearch-domains`, `anysearch-search`, `anysearch-extract`, and `anysearch-batch` use AnySearch only. Treat results as acceptance evidence until the target vertical domain is reviewed.
+- `sciverse-catalog`, `sciverse-search`, `sciverse-semantic`, `sciverse-read`, and `sciverse-relations` use Sciverse only. They are explicit academic commands and must not be inserted into default provider fallback.
 - `zhipu-search` uses Zhipu only.
 - `zhipu-mcp-search`, `zhipu-mcp-reader`, and `zhipu-mcp-*` zread commands use Zhipu Coding Plan Remote MCP only.
 - Runtime config priority is environment variables first, then local config file, then defaults.
@@ -108,6 +110,16 @@ AnySearch:
 - Dotted vertical domain shorthand such as `code.doc` is allowed for simple subdomains and must be normalized to `domain=code` plus `sub_domain=doc`; parameterized subdomains use explicit `--domain`, `--sub-domain`, and `--sub-domain-params` JSON before calling AnySearch.
 - `anysearch-batch` accepts at most 5 CLI query strings and returns `error_type=parameter_error` without sending a request when the limit is exceeded.
 
+Sciverse:
+
+- `SCIVERSE_API_URL` defaults to `https://api.sciverse.space`; `SCIVERSE_TIMEOUT_SECONDS` defaults to `30`.
+- `SCIVERSE_API_TOKEN` is required. Missing token returns `error_type=config_error` without a network request; configured requests send `Authorization: Bearer ...` and must never expose the token.
+- Commands map directly to Sciverse OpenAPI: catalog -> `GET /meta-catalog`, search -> `POST /meta-search`, semantic -> `POST /agentic-search`, read -> `GET /content`, relations -> `POST /meta-paper-relations`.
+- `sciverse-read` uses `doc_id`; `sciverse-relations` uses `unique_id`.
+- Relation direction must stay explicit: `CITATIONS` means papers citing the target paper, `REFERENCES` means papers cited by the target paper, and `RELATED_WORKS` means related work suggestions.
+- Local limits reject before network: search `page_size <= 50`, semantic `top_k <= 30`, read `limit <= 16384`, relations `page_size <= 200`.
+- `--filters-advanced` and `--sort-advanced` must be JSON arrays and fail with `parameter_error` before service/provider calls when invalid.
+
 OpenAI-compatible streaming:
 
 - `OPENAI_COMPATIBLE_STREAM` defaults to `false` and accepts `true`, `1`, or `yes` as true.
@@ -127,6 +139,7 @@ Exa domain filters:
 
 - Exa HTTP `400` or `422` failures are returned as `ok=false` with `error_type=parameter_error`; use this to distinguish bad CLI/domain/date/category arguments from upstream network failures.
 - AnySearch experimental output should preserve structured results without URLs as raw/structured evidence.
+- Sciverse experimental output should preserve raw response data under `raw` while exposing normalized `fields`, `results`, `hits`, `text`, or `items` depending on the command.
 - Diagnostic output should report Firecrawl status as whether `FIRECRAWL_API_KEY` is configured; it is not currently a live Firecrawl request.
 
 ## Routing Heuristics

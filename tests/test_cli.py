@@ -1,6 +1,9 @@
 import json
 import asyncio
 from pathlib import Path
+
+import pytest
+
 from smart_search import cli
 from smart_search import skill_installer
 
@@ -63,6 +66,11 @@ def test_each_subcommand_help_exits_successfully(capsys):
         ["anysearch-search", "--help"],
         ["anysearch-extract", "--help"],
         ["anysearch-batch", "--help"],
+        ["sciverse-catalog", "--help"],
+        ["sciverse-search", "--help"],
+        ["sciverse-semantic", "--help"],
+        ["sciverse-read", "--help"],
+        ["sciverse-relations", "--help"],
         ["context7-library", "--help"],
         ["context7-docs", "--help"],
         ["deep", "--help"],
@@ -120,6 +128,12 @@ def test_command_aliases_parse_to_canonical_commands():
         (["as", "query"], "anysearch-search"),
         (["as-extract", "https://example.com"], "anysearch-extract"),
         (["as-batch", "a", "b"], "anysearch-batch"),
+        (["sv-catalog"], "sciverse-catalog"),
+        (["sv-search", "query"], "sciverse-search"),
+        (["sv", "query"], "sciverse-search"),
+        (["sv-semantic", "query"], "sciverse-semantic"),
+        (["sv-read", "doc-1"], "sciverse-read"),
+        (["sv-relations", "paper-1"], "sciverse-relations"),
         (["c7", "react"], "context7-library"),
         (["ctx7", "react"], "context7-library"),
         (["c7d", "/reactjs/react.dev", "hooks"], "context7-docs"),
@@ -830,6 +844,27 @@ def test_network_error_exit_code(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["error"] == "upstream timeout"
 
 
+@pytest.mark.parametrize(
+    ("error_type", "expected_exit"),
+    [
+        ("auth_error", cli.EXIT_CONFIG_ERROR),
+        ("rate_limited", cli.EXIT_NETWORK_ERROR),
+        ("timeout", cli.EXIT_NETWORK_ERROR),
+        ("parse_error", cli.EXIT_NETWORK_ERROR),
+    ],
+)
+def test_provider_error_taxonomy_exit_codes(monkeypatch, capsys, error_type, expected_exit):
+    async def fake_sciverse_catalog(**kwargs):
+        return {"ok": False, "provider": "sciverse", "tool": "list_catalog", "error_type": error_type, "error": "upstream failure"}
+
+    monkeypatch.setattr(cli.service, "sciverse_catalog", fake_sciverse_catalog)
+
+    code = cli.main(["sv-catalog", "--format", "json"])
+
+    assert code == expected_exit
+    assert json.loads(capsys.readouterr().out)["error_type"] == error_type
+
+
 def test_stdout_falls_back_for_gbk_unencodable_unicode(monkeypatch):
     fake_stdout = GbkStdout()
     monkeypatch.setattr(cli.sys, "stdout", fake_stdout)
@@ -1332,6 +1367,7 @@ def test_non_content_commands_have_non_empty_content_fallback():
         "skills": {"ok": True, "targets": [{"target": "codex", "status": "up_to_date"}], "status_counts": {"up_to_date": 1}},
         "exa-search": {"ok": True, "results": [{"title": "Example", "url": "https://example.com"}]},
         "anysearch-search": {"ok": True, "provider": "anysearch", "results": [{"title": "AnySearch", "url": ""}]},
+        "sciverse-search": {"ok": True, "provider": "sciverse", "results": [{"title": "Sciverse Paper", "url": ""}]},
         "route-calibrate": {"ok": True, "primary_metric": "semantic_macro_f1", "dataset_size": 100, "model_results": [], "recommended_model": ""},
     }
     for command, data in cases.items():
@@ -1474,6 +1510,12 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
         "as-test-secret",
         "--anysearch-timeout",
         "9",
+        "--sciverse-api-url",
+        "sciverse.example.com",
+        "--sciverse-token",
+        "sciverse-test-secret",
+        "--sciverse-timeout",
+        "11",
     ])
 
     out = capsys.readouterr().out
@@ -1517,11 +1559,15 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["ANYSEARCH_API_URL"] == "https://anysearch.example.com/mcp"
     assert saved["ANYSEARCH_API_KEY"] == "as-test-secret"
     assert saved["ANYSEARCH_TIMEOUT_SECONDS"] == "9"
+    assert saved["SCIVERSE_API_URL"] == "https://sciverse.example.com"
+    assert saved["SCIVERSE_API_TOKEN"] == "sciverse-test-secret"
+    assert saved["SCIVERSE_TIMEOUT_SECONDS"] == "11"
     assert "xai-test-secret" not in out
     assert "th-test-secret" not in out
     assert "jina-secret" not in out
     assert "zmcp-secret" not in out
     assert "as-test-secret" not in out
+    assert "sciverse-test-secret" not in out
     assert "embed-test-secret" not in out
     assert "classifier-test-secret" not in out
 
@@ -2589,6 +2635,118 @@ def test_anysearch_search_rejects_array_sub_domain_params(monkeypatch, capsys):
     assert code == cli.EXIT_PARAMETER_ERROR
     assert data["error_type"] == "parameter_error"
     assert data["error"] == "--sub-domain-params must be a JSON object"
+
+
+def test_sciverse_commands_use_service_wrappers(monkeypatch, capsys):
+    calls = []
+
+    async def fake_catalog(collection="papers", include_sample_values=False, include_field_stats=False):
+        calls.append(("catalog", collection, include_sample_values, include_field_stats))
+        return {"ok": True, "provider": "sciverse", "tool": "list_catalog", "fields": []}
+
+    async def fake_search(**kwargs):
+        calls.append(("search", kwargs))
+        return {"ok": True, "provider": "sciverse", "tool": "search_papers", "query": kwargs.get("query"), "results": []}
+
+    async def fake_semantic(query, top_k=10, mode="balanced", source_types=""):
+        calls.append(("semantic", query, top_k, mode, source_types))
+        return {"ok": True, "provider": "sciverse", "tool": "semantic_search", "query": query, "hits": []}
+
+    async def fake_read(doc_id, offset=0, limit=4096):
+        calls.append(("read", doc_id, offset, limit))
+        return {"ok": True, "provider": "sciverse", "tool": "read_content", "doc_id": doc_id, "text": ""}
+
+    async def fake_relations(unique_id, relation="CITATIONS", page=1, page_size=25):
+        calls.append(("relations", unique_id, relation, page, page_size))
+        return {"ok": True, "provider": "sciverse", "tool": "list_paper_relations", "unique_id": unique_id, "items": []}
+
+    monkeypatch.setattr(cli.service, "sciverse_catalog", fake_catalog)
+    monkeypatch.setattr(cli.service, "sciverse_search", fake_search)
+    monkeypatch.setattr(cli.service, "sciverse_semantic", fake_semantic)
+    monkeypatch.setattr(cli.service, "sciverse_read", fake_read)
+    monkeypatch.setattr(cli.service, "sciverse_relations", fake_relations)
+
+    assert cli.main(["sv-catalog", "--collection", "papers", "--include-sample-values"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["tool"] == "list_catalog"
+    assert (
+        cli.main(
+            [
+                "sv",
+                "transformer retrieval",
+                "--year-from",
+                "2020",
+                "--authors",
+                "Ada Lovelace,Grace Hopper",
+                "--filters-advanced",
+                '[{"field":"year","op":">=","value":2020}]',
+                "--page-size",
+                "5",
+            ]
+        )
+        == cli.EXIT_OK
+    )
+    assert json.loads(capsys.readouterr().out)["query"] == "transformer retrieval"
+    assert cli.main(["sv-semantic", "attention mechanism", "--top-k", "3", "--mode", "balanced", "--source-types", "paper,abstract"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["tool"] == "semantic_search"
+    assert cli.main(["sv-read", "doc-1", "--offset", "10", "--limit", "100"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["doc_id"] == "doc-1"
+    assert cli.main(["sv-relations", "paper-1", "--relation", "REFERENCES", "--page", "2", "--page-size", "25"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["unique_id"] == "paper-1"
+
+    assert calls == [
+        ("catalog", "papers", True, False),
+        (
+            "search",
+            {
+                "query": "transformer retrieval",
+                "collection": "papers",
+                "title_contains": "",
+                "abstract_contains": "",
+                "authors": "Ada Lovelace,Grace Hopper",
+                "journals": "",
+                "subjects": "",
+                "year_from": 2020,
+                "year_to": None,
+                "filters_advanced": [{"field": "year", "op": ">=", "value": 2020}],
+                "sort_advanced": None,
+                "sort_by_year": "desc",
+                "freshness_boost": "NONE",
+                "page": 1,
+                "page_size": 5,
+            },
+        ),
+        ("semantic", "attention mechanism", 3, "balanced", "paper,abstract"),
+        ("read", "doc-1", 10, 100),
+        ("relations", "paper-1", "REFERENCES", 2, 25),
+    ]
+
+
+def test_sciverse_search_rejects_invalid_json_before_service(monkeypatch, capsys):
+    async def should_not_search(*args, **kwargs):
+        raise AssertionError("invalid advanced JSON must fail before service call")
+
+    monkeypatch.setattr(cli.service, "sciverse_search", should_not_search)
+
+    code = cli.main(["sv", "query", "--filters-advanced", "not-json", "--format", "json"])
+
+    data = json.loads(capsys.readouterr().out)
+    assert code == cli.EXIT_PARAMETER_ERROR
+    assert data["error_type"] == "parameter_error"
+    assert "--filters-advanced must be a JSON array" in data["error"]
+
+
+def test_sciverse_search_rejects_non_array_advanced_json(monkeypatch, capsys):
+    async def should_not_search(*args, **kwargs):
+        raise AssertionError("invalid advanced JSON must fail before service call")
+
+    monkeypatch.setattr(cli.service, "sciverse_search", should_not_search)
+
+    code = cli.main(["sv", "query", "--sort-advanced", "{}", "--format", "json"])
+
+    data = json.loads(capsys.readouterr().out)
+    assert code == cli.EXIT_PARAMETER_ERROR
+    assert data["error_type"] == "parameter_error"
+    assert data["error"] == "--sort-advanced must be a JSON array"
 
 
 def test_zhipu_mcp_commands_use_service_wrappers(monkeypatch, capsys):

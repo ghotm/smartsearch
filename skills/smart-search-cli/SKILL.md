@@ -29,6 +29,7 @@ Use the local `smart-search` command as the default execution layer for web rese
 - `fetch`: user-provided URLs or any claim that depends on page content.
 - `map`: documentation site or domain structure before fetching many pages from one site.
 - `anysearch-*`: explicit experimental vertical search only. Inspect domains first and do not use AnySearch as default fallback.
+- `sciverse-*`: explicit experimental academic search only. Use for catalog/search/semantic/read/relations; do not use Sciverse as `docs_search`, `standard`, or default `search` / `research` fallback.
 - `model current`: inspect explicit provider models only. Change models with `smart-search config set XAI_MODEL ...` or `smart-search config set OPENAI_COMPATIBLE_MODEL ...`.
 
 ## Key Boundaries

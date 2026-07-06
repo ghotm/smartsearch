@@ -145,7 +145,7 @@ provider keys or create Trellis/hooks/agents/commands.
 | `docs_search` | `context7-library`, `context7-docs`, `exa-search` | Context7, Exa | Official docs, SDKs, APIs, framework/library evidence |
 | `web_search` | `zhipu-search`, `zhipu-mcp-search`, intent-routed reinforcement inside `search` | Zhipu Web Search API, Zhipu Coding Plan MCP, Tavily, Firecrawl | Chinese, domestic, current, domain-filtered, or supplementary web discovery |
 | `web_fetch` | `fetch`, `zhipu-mcp-reader` | Tavily, Jina Reader, Zhipu Coding Plan MCP Reader, Firecrawl | Exact URL content extraction for evidence |
-| `vertical_search` | `anysearch-domains`, `anysearch-search`, `anysearch-extract`, `anysearch-batch` | AnySearch (experimental) | Acceptance testing for structured vertical domains such as CVE, finance, legal, academic, and code/docs |
+| `vertical_search` | `anysearch-domains`, `anysearch-search`, `anysearch-extract`, `anysearch-batch`, `sciverse-catalog`, `sciverse-search`, `sciverse-semantic`, `sciverse-read`, `sciverse-relations` | AnySearch and Sciverse (experimental) | Explicit structured vertical domains; Sciverse covers academic literature search, semantic search, content chunks, and citation relations |
 | `site_map` | `map` | Tavily | Site/documentation structure discovery |
 | `deep_planner` | `deep` / `dr` | Local planner only | Offline plan generation; no provider call by default |
 | `research_executor` | `research` / `rs` | Registered providers by capability | Live staged research: plan, discover, fetch/read, gap check, evidence-only synthesis |
@@ -159,7 +159,7 @@ Fallback is same-capability only:
 | `web_search` | Zhipu Web Search API -> Zhipu Coding Plan MCP `web_search_prime` -> Tavily -> Firecrawl |
 | `web_fetch` | Tavily -> Jina Reader with `JINA_API_KEY` -> Zhipu Coding Plan MCP `webReader` -> Firecrawl |
 
-AnySearch is intentionally not part of the `web_search` fallback chain and is not required by the `standard` minimum profile. Use its explicit commands for acceptance and boundary testing before promoting any vertical domain into a future route.
+AnySearch and Sciverse are intentionally not part of the `web_search` fallback chain and are not required by the `standard` minimum profile. Sciverse is also not a `docs_search` provider and does not join default `search` or `research` routing; use explicit `sciverse-*` commands when you need academic metadata, semantic paper hits, document chunks, or citation/reference relations.
 
 Jina Reader is a `web_fetch` provider only. `JINA_API_KEY` is required before Jina satisfies `SMART_SEARCH_MINIMUM_PROFILE=standard`; anonymous `r.jina.ai` behavior is treated as explicit/experimental fetch behavior and must not weaken fail-closed setup checks.
 
@@ -169,7 +169,7 @@ The CLI exposes observability fields such as `routing_decision`, `provider_attem
 
 `extra_sources` are discovery candidates. For high-risk claims, news, policy, finance, health, selection decisions, and serious reviews, fetch key pages first and cite fetched text rather than treating a broad search answer as proof.
 
-Routing rule of thumb: start with `search` for broad discovery and synthesis; use `research` when you want the CLI to execute the deeper evidence workflow; use Zhipu Web Search API for Chinese, domestic, policy, announcements, and current-news searches; use Zhipu Coding Plan MCP only when you explicitly want the Coding Plan quota route; use Context7 first for library/API/framework docs; use Exa for official domains, papers, product pages, trusted sites, and low-noise discovery; use Tavily/Firecrawl through `search --extra-sources` for horizontal candidates and through `fetch` for page evidence; use Jina for known-URL extraction; use AnySearch only when you explicitly need experimental vertical-domain search.
+Routing rule of thumb: start with `search` for broad discovery and synthesis; use `research` when you want the CLI to execute the deeper evidence workflow; use Zhipu Web Search API for Chinese, domestic, policy, announcements, and current-news searches; use Zhipu Coding Plan MCP only when you explicitly want the Coding Plan quota route; use Context7 first for library/API/framework docs; use Exa for official domains, papers, product pages, trusted sites, and low-noise discovery; use Tavily/Firecrawl through `search --extra-sources` for horizontal candidates and through `fetch` for page evidence; use Jina for known-URL extraction; use AnySearch only when you explicitly need experimental vertical-domain search; use Sciverse only when you explicitly need academic-field catalog/search/semantic/read/relations commands.
 
 ## Deep Research
 
@@ -226,6 +226,7 @@ The research router is capability-first plus provider-advantage:
 - Jina is favored for known public URLs, PDFs, and arXiv extraction; ReaderLM-v2 still requires `JINA_API_KEY`.
 - Firecrawl is favored for JS-heavy, dynamic, browser-like, OCR/PDF, or robust fallback extraction.
 - AnySearch participates only when vertical intent is clear, such as CVE, finance, legal, academic, or codebase/repository searches.
+- Sciverse is explicit-only in this release and does not participate in `research` provider fallback; use `sciverse-*` commands directly for academic relations.
 
 Advanced routing overrides are available through `SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS` and `SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS`. They can reorder or disable registered providers inside their supported capability, but they cannot move a provider across capability boundaries.
 
@@ -255,6 +256,7 @@ The default interactive setup wizard includes optional smart intent router promp
 | Jina Reader | Known URL page extraction for `web_fetch`; key required for standard minimum profile | `JINA_API_KEY`, `JINA_READER_API_URL`, `JINA_RESPOND_WITH`, `JINA_TIMEOUT_SECONDS` | [Jina Reader](https://jina.ai/reader/) | [Jina AI](https://jina.ai/) |
 | Firecrawl | Fetch fallback and supplementary web sources | `FIRECRAWL_API_URL`, `FIRECRAWL_API_KEY` | [Firecrawl docs](https://docs.firecrawl.dev/) | [Firecrawl API keys](https://www.firecrawl.dev/app/api-keys) |
 | AnySearch | Experimental vertical search acceptance surface; not a default fallback | `ANYSEARCH_API_URL`, `ANYSEARCH_API_KEY`, `ANYSEARCH_TIMEOUT_SECONDS` | [AnySearch docs](https://www.anysearch.com/docs) | [AnySearch API keys](https://www.anysearch.com/console/api-keys) |
+| Sciverse | Explicit experimental academic search, semantic paper retrieval, document chunks, and citation/reference relations; not a default fallback | `SCIVERSE_API_TOKEN`, `SCIVERSE_API_URL`, `SCIVERSE_TIMEOUT_SECONDS` | [Sciverse Agent Tools](https://github.com/opendatalab/Sciverse-Agent-Tools) | Sciverse dashboard / token provider |
 
 Intent router configuration:
 
@@ -297,6 +299,7 @@ Important boundaries:
 - `TAVILY_API_URL` affects Tavily only. It does not proxy Zhipu. For Tavily Hikari / pooled endpoints, use `https://<host>/api/tavily`; setup normalizes root-host or `/mcp` inputs to that REST base.
 - `FIRECRAWL_API_URL` defaults to `https://api.firecrawl.dev/v2`.
 - AnySearch uses JSON-RPC 2.0 `tools/call` at `https://api.anysearch.com/mcp` by default. It allows anonymous calls when no key is configured, but authenticated calls send `Authorization: Bearer ...`. HTTP 200 responses with `result.isError=true` are treated as provider errors, not as successful evidence.
+- Sciverse uses native HTTP/OpenAPI at `https://api.sciverse.space` by default. It requires `SCIVERSE_API_TOKEN`, returns `config_error` without a network request when the token is absent, sends `Authorization: Bearer ...` when configured, and remains explicit-only: not `docs_search`, not `standard`, and not default `search` / `research` fallback.
 - `doctor` and `route` report intent router status, embedding model, threshold, margin, their config source, timeout, and degradation behavior. They do not expose router API keys.
 
 Non-interactive setup example:
@@ -351,6 +354,19 @@ smart-search anysearch-batch "AAPL" "RAG papers" --max-results 2 --format json
 
 For simple vertical domains, dotted shorthand such as `code.doc` is still accepted and sent as `domain=code` plus `sub_domain=doc`. Parameterized domains should use the split form plus `--sub-domain-params` after inspecting `anysearch-domains`.
 
+Experimental Sciverse configuration is also optional and does not satisfy or change the `standard` minimum profile:
+
+```powershell
+smart-search setup --non-interactive --sciverse-token "your-sciverse-token" --sciverse-api-url "https://api.sciverse.space"
+smart-search sciverse-catalog --collection papers --format json
+smart-search sciverse-search "transformer retrieval" --year-from 2020 --page-size 5 --format json
+smart-search sciverse-semantic "attention mechanism" --top-k 3 --mode balanced --format json
+smart-search sciverse-read "doc-id-from-search" --offset 0 --limit 4096 --format json
+smart-search sciverse-relations "unique-id-from-search" --relation CITATIONS --page-size 25 --format json
+```
+
+Use `doc_id` for `sciverse-read` and `unique_id` for `sciverse-relations`. `CITATIONS` means papers citing the target paper; `REFERENCES` means papers cited by the target paper; `RELATED_WORKS` means related work suggestions. `--filters-advanced` and `--sort-advanced` accept JSON arrays for fields not promoted to first-class CLI flags.
+
 Local config path:
 
 - Windows default: `%LOCALAPPDATA%\smart-search\config.json`.
@@ -363,6 +379,7 @@ Provider timeouts:
 
 - `TAVILY_TIMEOUT_SECONDS` controls the Tavily `doctor` connectivity check timeout and defaults to `30`.
 - `ANYSEARCH_TIMEOUT_SECONDS` controls experimental AnySearch JSON-RPC calls and defaults to `30`.
+- `SCIVERSE_TIMEOUT_SECONDS` controls explicit Sciverse academic API calls and defaults to `30`.
 - Raise it for slower Tavily Hikari / pooled / community endpoints before treating the provider as unhealthy.
 
 ## Commands
@@ -387,6 +404,11 @@ Provider timeouts:
 | `anysearch-search` | `as-search`, `as` | Experimental AnySearch vertical/general search |
 | `anysearch-extract` | `as-extract` | Experimental AnySearch URL extraction |
 | `anysearch-batch` | `as-batch` | Experimental AnySearch batch search, up to 5 queries |
+| `sciverse-catalog` | `sv-catalog` | Experimental Sciverse academic field catalog |
+| `sciverse-search` | `sv-search`, `sv` | Experimental Sciverse structured academic search |
+| `sciverse-semantic` | `sv-semantic` | Experimental Sciverse semantic paper search |
+| `sciverse-read` | `sv-read` | Experimental Sciverse document chunk read by `doc_id` |
+| `sciverse-relations` | `sv-relations` | Experimental Sciverse citation/reference/related-work relations by `unique_id` |
 | `context7-library` | `c7`, `ctx7` | Resolve Context7 library candidates |
 | `context7-docs` | `c7d`, `c7docs`, `ctx7-docs` | Fetch Context7 docs |
 | `route-calibrate` | `route-cal`, `rcal` | Evaluate embedding router models and recommend threshold/margin |
@@ -418,6 +440,8 @@ smart-search zhipu-mcp-reader "https://example.com/source" --format json
 smart-search zhipu-mcp-search-doc "owner/repo" "install" --format json
 smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
+smart-search sciverse-search "transformer retrieval" --year-from 2020 --page-size 5 --format json
+smart-search sciverse-relations "unique-id-from-search" --relation CITATIONS --format json
 smart-search exa-similar "https://example.com/source" --num-results 5 --format json
 smart-search fetch "https://example.com/source" --format markdown --output page.md
 smart-search map "https://docs.example.com" --instructions "Find API reference pages" --max-depth 1 --limit 50 --format json
