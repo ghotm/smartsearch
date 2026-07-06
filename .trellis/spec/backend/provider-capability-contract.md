@@ -263,6 +263,12 @@ Provider configuration:
 - Zhipu Coding Plan MCP must be implemented first as a narrow tested
   MCP-over-HTTP provider layer. Avoid broad MCP abstractions until the
   first search, reader, and zread tools are stable.
+- Zhipu Coding Plan MCP endpoints use stateful MCP-over-HTTP. Each provider
+  instance must send JSON-RPC `initialize`, read the `Mcp-Session-Id` response
+  header, and include that header on subsequent `tools/call` requests for
+  `web_search_prime`, `webReader`, and zread tools. Missing or failed
+  initialization must surface as masked auth/provider errors without leaking
+  `ZHIPU_MCP_API_KEY`.
 - `JINA_API_KEY` registers Jina Reader as `web_fetch`.
 - `JINA_READER_API_URL` defaults to `https://r.jina.ai`.
 - `JINA_RESPOND_WITH` is optional. `JINA_RESPOND_WITH=readerlm-v2` requires
@@ -882,6 +888,9 @@ When this contract changes, add or update tests that assert:
 - `fetch URL` and known-URL `search "https://..."` use the same fetch chain;
 - Zhipu Coding Plan Remote MCP mock calls cover `web_search_prime`,
   `webReader`, `search_doc`, `get_repo_structure`, and `read_file`;
+- Zhipu Coding Plan Remote MCP mock calls assert `initialize` happens before
+  `tools/call`, `Mcp-Session-Id` is captured from response headers, and the
+  session header is sent on search, reader, and zread tool calls;
 - Zhipu MCP auth header is sent, masked, and provider errors are recorded in
   `provider_attempts` without cross-capability fallback;
 - strict validation returns insufficient evidence when sources are absent;

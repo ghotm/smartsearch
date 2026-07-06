@@ -5,12 +5,20 @@ from typing import Any
 
 import httpx
 
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+
 
 def _elapsed_ms(start: float) -> float:
     return round((time.time() - start) * 1000, 2)
 
 
+class ZhipuMCPSessionError(Exception):
+    pass
+
+
 def _error_payload(exc: Exception) -> dict[str, str]:
+    if isinstance(exc, ZhipuMCPSessionError):
+        return {"error_type": "provider_error", "error": str(exc)}
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
         if status_code in {401, 403}:
@@ -62,6 +70,17 @@ def _parse_sse_or_json(response: httpx.Response) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
     return response.json()
+
+
+def _jsonrpc_error_message(data: dict[str, Any]) -> str:
+    error = data.get("error") or {}
+    if isinstance(error, dict):
+        message = error.get("message")
+        if message:
+            return str(message)
+    if error:
+        return str(error)
+    return ""
 
 
 def _parse_markdown_results(text: str, provider: str) -> list[dict[str, str]]:
@@ -117,6 +136,49 @@ class ZhipuMCPProvider:
         self.api_key = api_key
         self.timeout = timeout
         self.provider_id = provider_id
+        self._session_id: str | None = None
+        self._request_id = 0
+
+    def _next_request_id(self) -> int:
+        self._request_id += 1
+        return self._request_id
+
+    def _headers(self, session_id: str = "") -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+        return headers
+
+    async def _ensure_session(self, client: httpx.AsyncClient) -> str:
+        if self._session_id:
+            return self._session_id
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._next_request_id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "smart-search", "version": "1"},
+            },
+        }
+        response = await client.post(self.api_url, headers=self._headers(), json=payload)
+        response.raise_for_status()
+        data = _parse_sse_or_json(response)
+        if "error" in data:
+            message = _jsonrpc_error_message(data)
+            raise ZhipuMCPSessionError(message or "Zhipu MCP initialize failed.")
+
+        session_id = (response.headers.get("Mcp-Session-Id") or "").strip()
+        if not session_id:
+            raise ZhipuMCPSessionError("Zhipu MCP initialize response did not include Mcp-Session-Id.")
+        self._session_id = session_id
+        return session_id
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         start = time.time()
@@ -134,21 +196,17 @@ class ZhipuMCPProvider:
                 indent=2,
             )
 
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        }
-
         try:
             timeout = httpx.Timeout(connect=6.0, read=self.timeout, write=10.0, pool=None)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                session_id = await self._ensure_session(client)
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": self._next_request_id(),
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                }
+                headers = self._headers(session_id)
                 response = await client.post(self.api_url, headers=headers, json=payload)
                 response.raise_for_status()
                 data = _parse_sse_or_json(response)
