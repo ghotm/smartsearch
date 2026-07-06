@@ -87,10 +87,49 @@ async def test_anysearch_anonymous_request_omits_authorization(monkeypatch):
     monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
 
     provider = AnySearchProvider("https://api.anysearch.com/mcp", None)
-    data = json.loads(await provider.list_domains())
+    data = json.loads(await provider.get_sub_domains("security"))
 
     assert data["ok"] is True
+    assert data["tool"] == "get_sub_domains"
+    assert FakeAnySearchClient.calls[0]["json"]["params"]["arguments"] == {"domain": "security"}
     assert "Authorization" not in FakeAnySearchClient.calls[0]["headers"]
+
+
+@pytest.mark.asyncio
+async def test_anysearch_domains_without_domain_reads_tool_schema(monkeypatch):
+    FakeAnySearchClient.response = httpx.Response(
+        200,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {
+                        "name": "get_sub_domains",
+                        "inputSchema": {
+                            "properties": {
+                                "domain": {
+                                    "enum": ["security", "code"],
+                                    "type": "string",
+                                }
+                            }
+                        },
+                    }
+                ]
+            },
+        },
+        request=httpx.Request("POST", "https://api.anysearch.com/mcp"),
+    )
+    monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
+
+    provider = AnySearchProvider("https://api.anysearch.com/mcp", "as-test-secret")
+    data = json.loads(await provider.get_sub_domains())
+
+    assert data["ok"] is True
+    assert data["tool"] == "get_sub_domains"
+    assert data["total"] == 2
+    assert [item["domain"] for item in data["results"]] == ["security", "code"]
+    assert FakeAnySearchClient.calls[0]["json"]["method"] == "tools/list"
 
 
 @pytest.mark.asyncio
@@ -179,13 +218,25 @@ async def test_anysearch_structured_result_without_url_is_preserved(monkeypatch)
     monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
 
     provider = AnySearchProvider("https://api.anysearch.com/mcp", "as-test-secret")
-    data = json.loads(await provider.vertical_search("CVE-2024-3094", domain="security.cve"))
+    data = json.loads(
+        await provider.vertical_search(
+            "CVE-2024-3094",
+            domain="security",
+            sub_domain="vuln",
+            sub_domain_params={"type": "cve", "value": "CVE-2024-3094"},
+        )
+    )
 
     assert data["ok"] is True
+    assert data["domain"] == "security"
+    assert data["sub_domain"] == "vuln"
+    assert data["sub_domain_params_keys"] == ["type", "value"]
     assert data["total"] == 1
     assert data["results"][0]["evidence_type"] == "structured"
     assert data["results"][0]["url"] == ""
     assert "CVE-2024-3094" in data["results"][0]["raw_content"]
+    call_args = FakeAnySearchClient.calls[0]["json"]["params"]["arguments"]
+    assert call_args["sub_domain_params"] == {"type": "cve", "value": "CVE-2024-3094"}
 
 
 @pytest.mark.asyncio

@@ -489,6 +489,89 @@ def _research_plan(query: str) -> dict:
     return service.build_deep_research_plan(query, budget="deep", evidence_dir="C:/tmp/smart-search-evidence/test")
 
 
+def test_context7_candidate_selection_prefers_relevant_react_library():
+    selected = service._select_context7_library_candidate(
+        [
+            {
+                "id": "/devopshq/artifactory-cleanup",
+                "title": "Artifactory Cleanup",
+                "description": "Delete old Artifactory artifacts.",
+                "trust_score": 99,
+            },
+            {
+                "id": "/reactjs/react.dev",
+                "title": "React",
+                "description": "Official React documentation for hooks and effects.",
+                "trust_score": 90,
+            },
+        ],
+        "React useEffect cleanup docs",
+    )
+
+    assert selected["id"] == "/reactjs/react.dev"
+
+
+def test_context7_candidate_selection_prefers_more_specific_react_ecosystem_library():
+    selected = service._select_context7_library_candidate(
+        [
+            {
+                "id": "/reactjs/react.dev",
+                "title": "React",
+                "description": "Official React documentation.",
+                "trust_score": 90,
+            },
+            {
+                "id": "/react-native/react-native",
+                "title": "React Native",
+                "description": "Official React Native documentation.",
+                "trust_score": 90,
+            },
+        ],
+        "React Native docs",
+    )
+
+    assert selected["id"] == "/react-native/react-native"
+
+
+@pytest.mark.asyncio
+async def test_research_context7_docs_uses_selected_library(monkeypatch, tmp_path):
+    _configure_research_minimum(monkeypatch)
+    docs_calls = []
+
+    async def fake_context7_library(name, query=""):
+        return {
+            "ok": True,
+            "results": [
+                {
+                    "id": "/devopshq/artifactory-cleanup",
+                    "title": "Artifactory Cleanup",
+                    "description": "Cleanup tool.",
+                    "trust_score": 99,
+                },
+                {
+                    "id": "/reactjs/react.dev",
+                    "title": "React",
+                    "description": "Official React hooks documentation.",
+                    "trust_score": 90,
+                },
+            ],
+            "total": 2,
+        }
+
+    async def fake_context7_docs(library_id, query):
+        docs_calls.append(library_id)
+        return {"ok": True, "library_id": library_id, "content": "React useEffect cleanup docs"}
+
+    monkeypatch.setattr(service, "context7_library", fake_context7_library)
+    monkeypatch.setattr(service, "context7_docs", fake_context7_docs)
+
+    result = await service.research("React useEffect cleanup docs", evidence_dir=str(tmp_path))
+
+    assert result["ok"] is True
+    assert docs_calls == ["/reactjs/react.dev"]
+    assert result["stage_results"][0]["selected_library_id"] == "/reactjs/react.dev"
+
+
 def test_research_provider_profiles_are_registered_with_capability_boundaries():
     profiles = service.provider_profiles()
 
@@ -1278,7 +1361,7 @@ async def test_docs_query_routes_docs_without_current_web_search(monkeypatch):
         return "Docs answer."
 
     async def fake_docs_search(query, providers="auto", fallback="auto"):
-        return [{"url": "context7:/facebook/react", "provider": "context7"}], [
+        return [{"url": "context7:/reactjs/react.dev", "provider": "context7"}], [
             {"capability": "docs_search", "provider": "context7", "status": "ok", "elapsed_ms": 1, "result_count": 1}
         ]
 
@@ -1725,12 +1808,12 @@ async def test_anysearch_service_wrappers_decode_provider_json(monkeypatch):
         def __init__(self, api_url, api_key, timeout):
             calls.append(("init", api_url, api_key, timeout))
 
-        async def list_domains(self, domain=""):
+        async def get_sub_domains(self, domain=""):
             calls.append(("domains", domain))
-            return json.dumps({"ok": True, "provider": "anysearch", "tool": "list_domains", "domain": domain})
+            return json.dumps({"ok": True, "provider": "anysearch", "tool": "get_sub_domains", "domain": domain})
 
-        async def vertical_search(self, query, domain="", sub_domain="", max_results=5):
-            calls.append(("search", query, domain, sub_domain, max_results))
+        async def vertical_search(self, query, domain="", sub_domain="", max_results=5, sub_domain_params=None):
+            calls.append(("search", query, domain, sub_domain, max_results, sub_domain_params))
             return json.dumps({"ok": True, "provider": "anysearch", "tool": "search", "query": query})
 
         async def extract(self, url, max_length=20000):
@@ -1747,11 +1830,17 @@ async def test_anysearch_service_wrappers_decode_provider_json(monkeypatch):
     monkeypatch.setattr(service, "AnySearchProvider", FakeAnySearchProvider)
 
     domains = await service.anysearch_domains("security")
-    search = await service.anysearch_search("CVE-2024-3094", domain="security.cve", sub_domain="xz", max_results=2)
+    search = await service.anysearch_search(
+        "CVE-2024-3094",
+        domain="security",
+        sub_domain="vuln",
+        max_results=2,
+        sub_domain_params={"type": "cve", "value": "CVE-2024-3094"},
+    )
     extract = await service.anysearch_extract("https://example.com", max_length=123)
     batch = await service.anysearch_batch(["a", "b"], max_results=1)
 
-    assert domains["tool"] == "list_domains"
+    assert domains["tool"] == "get_sub_domains"
     assert search["query"] == "CVE-2024-3094"
     assert extract["url"] == "https://example.com"
     assert batch["tool"] == "batch_search"
@@ -1759,7 +1848,7 @@ async def test_anysearch_service_wrappers_decode_provider_json(monkeypatch):
         ("init", "https://anysearch.example.com/mcp", "as-test-secret", 7.0),
         ("domains", "security"),
         ("init", "https://anysearch.example.com/mcp", "as-test-secret", 7.0),
-        ("search", "CVE-2024-3094", "security.cve", "xz", 2),
+        ("search", "CVE-2024-3094", "security", "vuln", 2, {"type": "cve", "value": "CVE-2024-3094"}),
         ("init", "https://anysearch.example.com/mcp", "as-test-secret", 7.0),
         ("extract", "https://example.com", 123),
         ("init", "https://anysearch.example.com/mcp", "as-test-secret", 7.0),
@@ -1773,7 +1862,7 @@ async def test_anysearch_service_parse_error(monkeypatch):
         def __init__(self, api_url, api_key, timeout):
             pass
 
-        async def list_domains(self, domain=""):
+        async def get_sub_domains(self, domain=""):
             return "not json"
 
     monkeypatch.setattr(service, "AnySearchProvider", FakeAnySearchProvider)

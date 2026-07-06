@@ -122,9 +122,9 @@ def test_command_aliases_parse_to_canonical_commands():
         (["as-batch", "a", "b"], "anysearch-batch"),
         (["c7", "react"], "context7-library"),
         (["ctx7", "react"], "context7-library"),
-        (["c7d", "/facebook/react", "hooks"], "context7-docs"),
-        (["c7docs", "/facebook/react", "hooks"], "context7-docs"),
-        (["ctx7-docs", "/facebook/react", "hooks"], "context7-docs"),
+        (["c7d", "/reactjs/react.dev", "hooks"], "context7-docs"),
+        (["c7docs", "/reactjs/react.dev", "hooks"], "context7-docs"),
+        (["ctx7-docs", "/reactjs/react.dev", "hooks"], "context7-docs"),
         (["dr", "query"], "deep"),
         (["route-cal"], "route-calibrate"),
         (["rcal"], "route-calibrate"),
@@ -336,7 +336,7 @@ def test_context7_docs_content_format_outputs_content(monkeypatch, capsys):
 
     monkeypatch.setattr(cli.service, "context7_docs", fake_context7_docs)
 
-    code = cli.main(["context7-docs", "/facebook/react", "hooks", "--format", "content"])
+    code = cli.main(["context7-docs", "/reactjs/react.dev", "hooks", "--format", "content"])
 
     assert code == cli.EXIT_OK
     assert capsys.readouterr().out == "中文文档内容\n"
@@ -1119,7 +1119,7 @@ def test_provider_markdown_outputs_result_lists(monkeypatch, capsys):
         return {"ok": True, "url": "https://source.example.com", "provider": "zhipu-mcp-reader", "tool": "webReader", "content": "# MCP Page"}
 
     async def fake_context7_library(*args, **kwargs):
-        return {"ok": True, "query": "react", "provider": "context7", "results": [{"id": "/facebook/react", "title": "React", "description": "docs"}]}
+        return {"ok": True, "query": "react", "provider": "context7", "results": [{"id": "/reactjs/react.dev", "title": "React", "description": "docs"}]}
 
     async def fake_map_site(*args, **kwargs):
         return {"ok": True, "url": "https://docs.example.com", "base_url": "https://docs.example.com", "results": ["https://docs.example.com/api"]}
@@ -1138,7 +1138,7 @@ def test_provider_markdown_outputs_result_lists(monkeypatch, capsys):
         (["zhipu-search", "news", "--format", "markdown"], "News", "https://news.example.com"),
         (["zhipu-mcp-search", "news", "--format", "markdown"], "MCP News", "https://mcp.example.com"),
         (["zhipu-mcp-reader", "https://source.example.com", "--format", "markdown"], "MCP Page", "Zhipu Coding Plan MCP Reader"),
-        (["context7-library", "react", "--format", "markdown"], "React", "/facebook/react"),
+        (["context7-library", "react", "--format", "markdown"], "React", "/reactjs/react.dev"),
         (["map", "https://docs.example.com", "--format", "markdown"], "https://docs.example.com/api", "Site Map"),
     ]
     for argv, first, second in cases:
@@ -2511,10 +2511,10 @@ def test_anysearch_commands_use_service_wrappers(monkeypatch, capsys):
 
     async def fake_domains(domain=""):
         calls.append(("domains", domain))
-        return {"ok": True, "provider": "anysearch", "tool": "list_domains", "results": []}
+        return {"ok": True, "provider": "anysearch", "tool": "get_sub_domains", "results": []}
 
-    async def fake_search(query, domain="", sub_domain="", max_results=5):
-        calls.append(("search", query, domain, sub_domain, max_results))
+    async def fake_search(query, domain="", sub_domain="", max_results=5, sub_domain_params=None):
+        calls.append(("search", query, domain, sub_domain, max_results, sub_domain_params))
         return {"ok": True, "provider": "anysearch", "tool": "search", "query": query, "results": []}
 
     async def fake_extract(url, max_length=20000):
@@ -2531,8 +2531,24 @@ def test_anysearch_commands_use_service_wrappers(monkeypatch, capsys):
     monkeypatch.setattr(cli.service, "anysearch_batch", fake_batch)
 
     assert cli.main(["anysearch-domains", "security"]) == cli.EXIT_OK
-    assert json.loads(capsys.readouterr().out)["tool"] == "list_domains"
-    assert cli.main(["as", "CVE-2024-3094", "--domain", "security.cve", "--sub-domain", "xz", "--max-results", "2"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["tool"] == "get_sub_domains"
+    assert (
+        cli.main(
+            [
+                "as",
+                "CVE-2024-3094",
+                "--domain",
+                "security",
+                "--sub-domain",
+                "vuln",
+                "--sub-domain-params",
+                '{"type":"cve","value":"CVE-2024-3094"}',
+                "--max-results",
+                "2",
+            ]
+        )
+        == cli.EXIT_OK
+    )
     assert json.loads(capsys.readouterr().out)["query"] == "CVE-2024-3094"
     assert cli.main(["as-extract", "https://example.com", "--max-length", "123"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["url"] == "https://example.com"
@@ -2541,10 +2557,38 @@ def test_anysearch_commands_use_service_wrappers(monkeypatch, capsys):
 
     assert calls == [
         ("domains", "security"),
-        ("search", "CVE-2024-3094", "security.cve", "xz", 2),
+        ("search", "CVE-2024-3094", "security", "vuln", 2, {"type": "cve", "value": "CVE-2024-3094"}),
         ("extract", "https://example.com", 123),
         ("batch", ["a", "b"], 1),
     ]
+
+
+def test_anysearch_search_rejects_invalid_sub_domain_params(monkeypatch, capsys):
+    async def should_not_search(*args, **kwargs):
+        raise AssertionError("invalid sub_domain_params must fail before service call")
+
+    monkeypatch.setattr(cli.service, "anysearch_search", should_not_search)
+
+    code = cli.main(["as", "CVE-2024-3094", "--sub-domain-params", "not-json", "--format", "json"])
+
+    data = json.loads(capsys.readouterr().out)
+    assert code == cli.EXIT_PARAMETER_ERROR
+    assert data["error_type"] == "parameter_error"
+    assert "--sub-domain-params must be a JSON object" in data["error"]
+
+
+def test_anysearch_search_rejects_array_sub_domain_params(monkeypatch, capsys):
+    async def should_not_search(*args, **kwargs):
+        raise AssertionError("invalid sub_domain_params must fail before service call")
+
+    monkeypatch.setattr(cli.service, "anysearch_search", should_not_search)
+
+    code = cli.main(["as", "CVE-2024-3094", "--sub-domain-params", "[]", "--format", "json"])
+
+    data = json.loads(capsys.readouterr().out)
+    assert code == cli.EXIT_PARAMETER_ERROR
+    assert data["error_type"] == "parameter_error"
+    assert data["error"] == "--sub-domain-params must be a JSON object"
 
 
 def test_zhipu_mcp_commands_use_service_wrappers(monkeypatch, capsys):
@@ -2610,7 +2654,7 @@ def test_provider_and_smoke_aliases_use_canonical_commands(monkeypatch, capsys):
         return {"ok": True, "provider": "context7-docs"}
 
     async def fake_anysearch_domains(*args, **kwargs):
-        return {"ok": True, "provider": "anysearch", "tool": "list_domains"}
+        return {"ok": True, "provider": "anysearch", "tool": "get_sub_domains"}
 
     async def fake_anysearch_search(*args, **kwargs):
         return {"ok": True, "provider": "anysearch", "tool": "search"}
@@ -2643,7 +2687,7 @@ def test_provider_and_smoke_aliases_use_canonical_commands(monkeypatch, capsys):
     assert cli.main(["z", "query"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["provider"] == "zhipu"
     assert cli.main(["as-domains"]) == cli.EXIT_OK
-    assert json.loads(capsys.readouterr().out)["tool"] == "list_domains"
+    assert json.loads(capsys.readouterr().out)["tool"] == "get_sub_domains"
     assert cli.main(["as-search", "query"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["tool"] == "search"
     assert cli.main(["as-extract", "https://example.com"]) == cli.EXIT_OK
@@ -2652,7 +2696,7 @@ def test_provider_and_smoke_aliases_use_canonical_commands(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["tool"] == "batch_search"
     assert cli.main(["c7", "react"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["provider"] == "context7-library"
-    assert cli.main(["c7docs", "/facebook/react", "hooks"]) == cli.EXIT_OK
+    assert cli.main(["c7docs", "/reactjs/react.dev", "hooks"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["provider"] == "context7-docs"
     assert cli.main(["rs", "query"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["query_mode"] == "research"

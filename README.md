@@ -344,12 +344,12 @@ Experimental AnySearch configuration is optional and does not satisfy or change 
 ```powershell
 smart-search setup --non-interactive --anysearch-api-url "https://api.anysearch.com/mcp" --anysearch-key "your-anysearch-key"
 smart-search anysearch-domains security --format json
-smart-search anysearch-search "CVE-2024-3094" --domain security.cve --max-results 3 --format json
+smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
 smart-search anysearch-batch "AAPL" "RAG papers" --max-results 2 --format json
 ```
 
-For vertical domains, the dotted shorthand `security.cve` is accepted by the CLI and sent to AnySearch as `domain=security` plus `sub_domain=cve`. You can also pass the split form explicitly with `--domain security --sub-domain cve`.
+For simple vertical domains, dotted shorthand such as `code.doc` is still accepted and sent as `domain=code` plus `sub_domain=doc`. Parameterized domains should use the split form plus `--sub-domain-params` after inspecting `anysearch-domains`.
 
 Local config path:
 
@@ -411,12 +411,12 @@ smart-search config set OPENAI_COMPATIBLE_FALLBACK_MODELS "grok-4.3-fast" --form
 smart-search search "nba report" --format content
 smart-search exa-search "OpenAI Responses API documentation" --include-domains platform.openai.com developers.openai.com --num-results 5 --include-text --format json
 smart-search context7-library "react" "hooks" --format json
-smart-search context7-docs "/facebook/react" "useEffect cleanup" --format json
+smart-search context7-docs "/reactjs/react.dev" "useEffect cleanup" --format json
 smart-search zhipu-search "today China AI news" --search-engine search_pro_sogou --count 5 --format json
 smart-search zhipu-mcp-search "today China AI news" --count 5 --format json
 smart-search zhipu-mcp-reader "https://example.com/source" --format json
 smart-search zhipu-mcp-search-doc "owner/repo" "install" --format json
-smart-search anysearch-search "CVE-2024-3094" --domain security.cve --max-results 3 --format json
+smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
 smart-search exa-similar "https://example.com/source" --num-results 5 --format json
 smart-search fetch "https://example.com/source" --format markdown --output page.md

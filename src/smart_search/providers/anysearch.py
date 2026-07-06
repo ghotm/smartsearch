@@ -88,9 +88,39 @@ class AnySearchProvider(BaseSearchProvider):
     async def search(self, query: str, max_results: int = 5) -> str:
         return await self.call_tool("search", {"query": query, "max_results": max_results})
 
-    async def list_domains(self, domain: str = "") -> str:
+    async def get_sub_domains(self, domain: str = "") -> str:
+        if not domain:
+            return await self.list_available_domains()
         arguments = {"domain": domain} if domain else {}
-        return await self.call_tool("list_domains", arguments)
+        return await self.call_tool("get_sub_domains", arguments)
+
+    async def list_domains(self, domain: str = "") -> str:
+        return await self.get_sub_domains(domain)
+
+    async def list_available_domains(self) -> str:
+        start = time.time()
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            timeout = httpx.Timeout(connect=6.0, read=self.timeout, write=10.0, pool=None)
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                response = await client.post(self.api_url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+            output = self._normalize_domain_schema(data, start)
+        except Exception as e:
+            error = _error_payload(e)
+            output = {
+                "ok": False,
+                "provider": "anysearch",
+                "tool": "get_sub_domains",
+                "error_type": error["error_type"],
+                "error": error["error"],
+                "elapsed_ms": round((time.time() - start) * 1000, 2),
+            }
+        return json.dumps(output, ensure_ascii=False, indent=2)
 
     async def vertical_search(
         self,
@@ -98,6 +128,7 @@ class AnySearchProvider(BaseSearchProvider):
         domain: str = "",
         sub_domain: str = "",
         max_results: int = 5,
+        sub_domain_params: dict[str, Any] | None = None,
     ) -> str:
         arguments: dict[str, Any] = {"query": query, "max_results": max_results}
         domain, sub_domain = _split_domain(domain, sub_domain)
@@ -105,6 +136,8 @@ class AnySearchProvider(BaseSearchProvider):
             arguments["domain"] = domain
         if sub_domain:
             arguments["sub_domain"] = sub_domain
+        if sub_domain_params:
+            arguments["sub_domain_params"] = sub_domain_params
         return await self.call_tool("search", arguments)
 
     async def extract(self, url: str, max_length: int = 20000) -> str:
@@ -200,7 +233,52 @@ class AnySearchProvider(BaseSearchProvider):
         for key in ("query", "domain", "sub_domain", "url"):
             if arguments.get(key):
                 output[key] = arguments[key]
+        if isinstance(arguments.get("sub_domain_params"), dict):
+            output["sub_domain_params_keys"] = sorted(arguments["sub_domain_params"])
         if is_error:
             output["error_type"] = "provider_error"
             output["error"] = text or "AnySearch tool returned isError=true"
         return output
+
+    def _normalize_domain_schema(self, data: dict[str, Any], start: float) -> dict[str, Any]:
+        if "error" in data:
+            error = data.get("error") or {}
+            message = error.get("message") if isinstance(error, dict) else str(error)
+            return {
+                "ok": False,
+                "provider": "anysearch",
+                "tool": "get_sub_domains",
+                "error_type": "provider_error",
+                "error": message or "AnySearch JSON-RPC error",
+                "elapsed_ms": round((time.time() - start) * 1000, 2),
+            }
+        tools = (data.get("result") or {}).get("tools") or []
+        schema: dict[str, Any] = {}
+        for tool in tools:
+            if tool.get("name") == "get_sub_domains":
+                schema = tool.get("inputSchema") or {}
+                break
+        properties = schema.get("properties") or {}
+        domain_property = properties.get("domain") or {}
+        domains_property = properties.get("domains") or {}
+        domain_values = domain_property.get("enum") or ((domains_property.get("items") or {}).get("enum") or [])
+        results = [
+            {
+                "domain": domain,
+                "title": domain,
+                "url": "",
+                "description": f"Run anysearch-domains {domain} to inspect subdomains.",
+            }
+            for domain in domain_values
+        ]
+        content = "\n".join(domain_values)
+        return {
+            "ok": bool(domain_values),
+            "provider": "anysearch",
+            "tool": "get_sub_domains",
+            "content": content,
+            "raw_content": content,
+            "results": results,
+            "total": len(results),
+            "elapsed_ms": round((time.time() - start) * 1000, 2),
+        }

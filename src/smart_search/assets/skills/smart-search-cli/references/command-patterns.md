@@ -32,10 +32,10 @@ smart-search search "query" --validation strict --fallback auto --providers auto
 smart-search exa-search "query" --num-results 5 --search-type neural --include-text --include-highlights --include-domains docs.example.com developer.mozilla.org --format json
 smart-search exa-similar "https://example.com/article" --num-results 5 --format json
 smart-search context7-library "react" "hooks" --format json
-smart-search context7-docs "/facebook/react" "useEffect cleanup" --format json
+smart-search context7-docs "/reactjs/react.dev" "useEffect cleanup" --format json
 smart-search zhipu-search "today China AI news" --count 5 --format json
 smart-search anysearch-domains security --format json
-smart-search anysearch-search "CVE-2024-3094" --domain security.cve --max-results 3 --format json
+smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
 smart-search anysearch-batch "AAPL" "RAG papers" --max-results 2 --format json
 smart-search fetch "https://example.com" --format markdown --output page.md
@@ -110,7 +110,7 @@ smart-search f "https://example.com" --format markdown
 smart-search exa "OpenAI Responses API documentation" --format json
 smart-search z "today China AI news" --format json
 smart-search c7 "react" "hooks" --format json
-smart-search c7docs "/facebook/react" "useEffect cleanup" --format json
+smart-search c7docs "/reactjs/react.dev" "useEffect cleanup" --format json
 smart-search cfg ls --format json
 smart-search d --format markdown
 smart-search mdl cur --format json

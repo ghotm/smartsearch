@@ -505,6 +505,108 @@ def _normalize_source_results(results: list[dict] | None, provider: str) -> list
     return normalized
 
 
+_CONTEXT7_PREFERRED_LIBRARY_IDS = {
+    "react": "/reactjs/react.dev",
+    "reactjs": "/reactjs/react.dev",
+    "react.dev": "/reactjs/react.dev",
+}
+_CONTEXT7_LIBRARY_STOPWORDS = {
+    "api",
+    "docs",
+    "doc",
+    "documentation",
+    "guide",
+    "guides",
+    "latest",
+    "official",
+    "reference",
+    "sdk",
+    "tutorial",
+}
+
+
+def _context7_library_tokens(text: str) -> list[str]:
+    tokens = [token for token in re.findall(r"[a-z0-9]+", text.lower()) if len(token) > 1]
+    return [token for token in tokens if token not in _CONTEXT7_LIBRARY_STOPWORDS]
+
+
+def _numeric_context7_score(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _context7_has_more_specific_preferred_candidate(
+    candidates: list[dict], query_tokens: list[str], preferred_id: str
+) -> bool:
+    query_token_set = set(query_tokens)
+    preferred_family_tokens = set(_context7_library_tokens(preferred_id))
+    for token, candidate_preferred_id in _CONTEXT7_PREFERRED_LIBRARY_IDS.items():
+        if candidate_preferred_id == preferred_id:
+            preferred_family_tokens.update(_context7_library_tokens(token))
+    extra_query_tokens = query_token_set - preferred_family_tokens
+    if not extra_query_tokens:
+        return False
+
+    for item in candidates:
+        library_id = str(item.get("id") or "").lower()
+        if library_id == preferred_id:
+            continue
+        title = str(item.get("title") or "")
+        id_title_tokens = set(_context7_library_tokens(f"{library_id} {title}"))
+        if (preferred_family_tokens & id_title_tokens) and (extra_query_tokens & id_title_tokens):
+            return True
+    return False
+
+
+def _context7_candidate_score(
+    item: dict[str, Any], query_tokens: list[str], skipped_preferred_ids: set[str] | None = None
+) -> float:
+    library_id = str(item.get("id") or "").lower()
+    title = str(item.get("title") or "").lower()
+    description = str(item.get("description") or "").lower()
+    id_title_tokens = set(_context7_library_tokens(f"{library_id} {title}"))
+    description_tokens = set(_context7_library_tokens(description))
+    query_token_set = set(query_tokens)
+    skipped_preferred_ids = skipped_preferred_ids or set()
+    score = 0.0
+
+    for token, preferred_id in _CONTEXT7_PREFERRED_LIBRARY_IDS.items():
+        if token in query_token_set and library_id == preferred_id and library_id not in skipped_preferred_ids:
+            score += 100
+
+    if query_tokens and query_tokens[0] in id_title_tokens:
+        score += 35
+    score += len(query_token_set & id_title_tokens) * 12
+    score += len(query_token_set & description_tokens) * 3
+    score += min(_numeric_context7_score(item.get("trust_score")), 100) / 10
+    score += min(_numeric_context7_score(item.get("benchmark_score")), 100) / 20
+    return score
+
+
+def _select_context7_library_candidate(results: list[dict] | None, query: str) -> dict[str, Any] | None:
+    query_tokens = _context7_library_tokens(query)
+    if not query_tokens:
+        return None
+    candidates = [item for item in results or [] if item.get("id")]
+    if not candidates:
+        return None
+    skipped_preferred_ids = {
+        preferred_id
+        for token, preferred_id in _CONTEXT7_PREFERRED_LIBRARY_IDS.items()
+        if token in query_tokens and _context7_has_more_specific_preferred_candidate(candidates, query_tokens, preferred_id)
+    }
+    scored = sorted(
+        ((_context7_candidate_score(item, query_tokens, skipped_preferred_ids), item) for item in candidates),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    if scored[0][0] <= 0:
+        return None
+    return scored[0][1]
+
+
 def _provider_names_from_attempts(attempts: list[dict]) -> list[str]:
     names: list[str] = []
     for attempt in attempts:
@@ -1270,8 +1372,17 @@ async def research(
                 data = await context7_library(question, question)
                 if data.get("ok") and data.get("results"):
                     provider_attempts.append(_attempt("docs_search", "context7", "ok", step_start, result_count=len(data.get("results") or [])))
-                    stage_results.append({"stage": "docs_discovery", "provider": "context7", "ok": True, "result_count": len(data.get("results") or [])})
-                    library_id = (data.get("results") or [{}])[0].get("id", "")
+                    selected_library = _select_context7_library_candidate(data.get("results"), question)
+                    library_id = (selected_library or {}).get("id", "")
+                    stage_results.append(
+                        {
+                            "stage": "docs_discovery",
+                            "provider": "context7",
+                            "ok": bool(library_id),
+                            "result_count": len(data.get("results") or []),
+                            "selected_library_id": library_id,
+                        }
+                    )
                     if library_id:
                         docs_start = time.time()
                         docs_data = await context7_docs(library_id, question)
@@ -3020,16 +3131,23 @@ async def _decode_provider_json(raw: str, provider: str = "anysearch") -> dict[s
 
 
 async def anysearch_domains(domain: str = "") -> dict[str, Any]:
-    return await _decode_provider_json(await _anysearch_provider().list_domains(domain))
+    return await _decode_provider_json(await _anysearch_provider().get_sub_domains(domain))
 
 
-async def anysearch_search(query: str, domain: str = "", sub_domain: str = "", max_results: int = 5) -> dict[str, Any]:
+async def anysearch_search(
+    query: str,
+    domain: str = "",
+    sub_domain: str = "",
+    max_results: int = 5,
+    sub_domain_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return await _decode_provider_json(
         await _anysearch_provider().vertical_search(
             query=query,
             domain=domain,
             sub_domain=sub_domain,
             max_results=max_results,
+            sub_domain_params=sub_domain_params,
         )
     )
 

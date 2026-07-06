@@ -1251,6 +1251,18 @@ def _add_format_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", default="", help="Write rendered output to a file.")
 
 
+def _parse_json_object_arg(value: str, option_name: str) -> dict[str, Any] | None:
+    if not value:
+        return None
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{option_name} must be a JSON object: {exc.msg}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{option_name} must be a JSON object")
+    return data
+
+
 def _is_secret_key(key: str) -> bool:
     upper_key = key.upper()
     return "KEY" in upper_key or "TOKEN" in upper_key or "SECRET" in upper_key
@@ -2455,11 +2467,17 @@ async def _run_async(args: argparse.Namespace) -> int:
         data = await service.anysearch_domains(args.domain)
         return _print_result("anysearch-domains", data, args.format, args.output)
     if args.command == "anysearch-search":
+        try:
+            sub_domain_params = _parse_json_object_arg(args.sub_domain_params, "--sub-domain-params")
+        except ValueError as exc:
+            data = {"ok": False, "error_type": "parameter_error", "error": str(exc)}
+            return _print_result("anysearch-search", data, args.format, args.output)
         data = await service.anysearch_search(
             args.query,
             domain=args.domain,
             sub_domain=args.sub_domain,
             max_results=args.max_results,
+            sub_domain_params=sub_domain_params,
         )
         return _print_result("anysearch-search", data, args.format, args.output)
     if args.command == "anysearch-extract":
@@ -2886,6 +2904,7 @@ def build_parser() -> argparse.ArgumentParser:
     anysearch_search_parser.add_argument("query")
     anysearch_search_parser.add_argument("--domain", default="")
     anysearch_search_parser.add_argument("--sub-domain", default="")
+    anysearch_search_parser.add_argument("--sub-domain-params", default="", help="JSON object forwarded to AnySearch sub_domain_params.")
     anysearch_search_parser.add_argument("--max-results", type=int, default=5)
     _add_format_args(anysearch_search_parser)
 

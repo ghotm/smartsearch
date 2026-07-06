@@ -131,7 +131,7 @@ async def test_search_docs_intent_uses_docs_fallback(monkeypatch):
         return "Answer."
 
     async def fake_context7(name, query=""):
-        return {"ok": True, "results": [{"id": "/facebook/react", "title": "React", "description": "UI"}], "total": 1}
+        return {"ok": True, "results": [{"id": "/reactjs/react.dev", "title": "React", "description": "UI"}], "total": 1}
 
     monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
     monkeypatch.setattr(service, "context7_library", fake_context7)

@@ -133,7 +133,7 @@ async def test_context7_provider_normalizes_library_results(monkeypatch):
         async def get(self, endpoint, headers):
             return httpx.Response(
                 200,
-                json=[{"id": "/facebook/react", "title": "React", "description": "UI"}],
+                json=[{"id": "/reactjs/react.dev", "title": "React", "description": "UI"}],
                 headers={"content-type": "application/json"},
                 request=httpx.Request("GET", endpoint),
             )
@@ -144,7 +144,7 @@ async def test_context7_provider_normalizes_library_results(monkeypatch):
     data = json.loads(await provider.library("react", "hooks"))
 
     assert data["ok"] is True
-    assert data["results"][0]["id"] == "/facebook/react"
+    assert data["results"][0]["id"] == "/reactjs/react.dev"
     assert data["results"][0]["provider"] == "context7"
 
 
