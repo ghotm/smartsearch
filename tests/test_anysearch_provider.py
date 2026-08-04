@@ -3,7 +3,10 @@ import json
 import httpx
 import pytest
 
-from smart_search.providers.anysearch import AnySearchProvider
+from smart_search.providers.anysearch import (
+    AnySearchProvider,
+    parse_sub_domain_params,
+)
 
 
 class FakeAnySearchClient:
@@ -81,7 +84,18 @@ async def test_anysearch_jsonrpc_success_parses_markdown_and_auth_header(monkeyp
 async def test_anysearch_anonymous_request_omits_authorization(monkeypatch):
     FakeAnySearchClient.response = httpx.Response(
         200,
-        json={"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "No domains"}]}},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "## security Domain Capabilities\n\n### security.vuln\nCVE lookup",
+                    }
+                ]
+            },
+        },
         request=httpx.Request("POST", "https://api.anysearch.com/mcp"),
     )
     monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
@@ -93,6 +107,74 @@ async def test_anysearch_anonymous_request_omits_authorization(monkeypatch):
     assert data["tool"] == "get_sub_domains"
     assert FakeAnySearchClient.calls[0]["json"]["params"]["arguments"] == {"domain": "security"}
     assert "Authorization" not in FakeAnySearchClient.calls[0]["headers"]
+
+
+@pytest.mark.asyncio
+async def test_anysearch_vertical_search_sends_sub_domain_params(monkeypatch):
+    FakeAnySearchClient.response = httpx.Response(
+        200,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": "CVE-2024-3094 severity: critical"}]},
+        },
+        request=httpx.Request("POST", "https://api.anysearch.com/mcp"),
+    )
+    monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
+
+    provider = AnySearchProvider("https://api.anysearch.com/mcp", "as-test-secret")
+    params = {"type": "cve", "value": "CVE-2024-3094"}
+    data = json.loads(
+        await provider.vertical_search(
+            "CVE-2024-3094",
+            domain="security",
+            sub_domain="vuln",
+            max_results=2,
+            sub_domain_params=params,
+        )
+    )
+
+    assert data["ok"] is True
+    assert data["sub_domain_params_keys"] == ["type", "value"]
+    assert FakeAnySearchClient.calls[0]["json"]["params"]["arguments"]["sub_domain_params"] == params
+
+
+@pytest.mark.asyncio
+async def test_anysearch_extract_omits_max_length_and_truncates_locally(monkeypatch):
+    FakeAnySearchClient.response = httpx.Response(
+        200,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}]},
+        },
+        request=httpx.Request("POST", "https://api.anysearch.com/mcp"),
+    )
+    monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
+
+    provider = AnySearchProvider("https://api.anysearch.com/mcp", "as-test-secret")
+    data = json.loads(await provider.extract("https://example.com", max_length=10))
+
+    assert data["ok"] is True
+    assert FakeAnySearchClient.calls[0]["json"]["params"]["arguments"] == {"url": "https://example.com"}
+    assert data["content"] == "ABCDEFGHIJ"
+    assert data["max_length"] == 10
+
+
+def test_parse_sub_domain_params_merges_json_and_key_values():
+    params = parse_sub_domain_params('{"type":"cve"}', ["value=CVE-2024-3094", "extra=1"])
+    assert params == {"type": "cve", "value": "CVE-2024-3094", "extra": "1"}
+
+
+def test_parse_sub_domain_params_rejects_invalid_json():
+    with pytest.raises(ValueError, match="invalid --sub-domain-params JSON"):
+        parse_sub_domain_params("{bad", [])
+
+
+@pytest.mark.parametrize("value", ["missing-equals", "=value"])
+def test_parse_sub_domain_params_rejects_invalid_key_values(value):
+    with pytest.raises(ValueError, match="invalid --param value"):
+        parse_sub_domain_params("", [value])
 
 
 @pytest.mark.asyncio

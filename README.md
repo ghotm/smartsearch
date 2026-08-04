@@ -347,12 +347,12 @@ Experimental AnySearch configuration is optional and does not satisfy or change 
 ```powershell
 smart-search setup --non-interactive --anysearch-api-url "https://api.anysearch.com/mcp" --anysearch-key "your-anysearch-key"
 smart-search anysearch-domains security --format json
-smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --max-results 3 --format json
+smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --param type=cve --param value=CVE-2024-3094 --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
 smart-search anysearch-batch "AAPL" "RAG papers" --max-results 2 --format json
 ```
 
-For simple vertical domains, dotted shorthand such as `code.doc` is still accepted and sent as `domain=code` plus `sub_domain=doc`. Parameterized domains should use the split form plus `--sub-domain-params` after inspecting `anysearch-domains`.
+For simple vertical domains, dotted shorthand such as `code.doc` is still accepted and sent as `domain=code` plus `sub_domain=doc`. Parameterized domains should use the split form with `--sub-domain-params` JSON and/or repeatable `--param key=value`; repeated parameters override matching JSON keys. `anysearch-domains DOMAIN` calls the live `get_sub_domains` tool, while omitting `DOMAIN` reads its `tools/list` schema. `anysearch-extract --max-length` truncates a successful response locally and sends only `url` upstream.
 
 Experimental Sciverse configuration is also optional and does not satisfy or change the `standard` minimum profile:
 
@@ -438,7 +438,7 @@ smart-search zhipu-search "today China AI news" --search-engine search_pro_sogou
 smart-search zhipu-mcp-search "today China AI news" --count 5 --format json
 smart-search zhipu-mcp-reader "https://example.com/source" --format json
 smart-search zhipu-mcp-search-doc "owner/repo" "install" --format json
-smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --max-results 3 --format json
+smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --param type=cve --param value=CVE-2024-3094 --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
 smart-search sciverse-search "transformer retrieval" --year-from 2020 --page-size 5 --format json
 smart-search sciverse-relations "unique-id-from-search" --relation CITATIONS --format json

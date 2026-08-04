@@ -16,6 +16,7 @@ from .embedding_presets import (
     QWEN3_EMBEDDING_8B_PRESET,
     embedding_preset_for_model,
 )
+from .providers.anysearch import parse_sub_domain_params
 from .skill_installer import (
     DEFAULT_SKILL_TARGET_IDS,
     SKILL_TARGETS,
@@ -2506,7 +2507,10 @@ async def _run_async(args: argparse.Namespace) -> int:
         return _print_result("anysearch-domains", data, args.format, args.output)
     if args.command == "anysearch-search":
         try:
-            sub_domain_params = _parse_json_object_arg(args.sub_domain_params, "--sub-domain-params")
+            sub_domain_params = parse_sub_domain_params(
+                getattr(args, "sub_domain_params", "") or "",
+                getattr(args, "param", None) or [],
+            )
         except ValueError as exc:
             data = {"ok": False, "error_type": "parameter_error", "error": str(exc)}
             return _print_result("anysearch-search", data, args.format, args.output)
@@ -2997,6 +3001,12 @@ def build_parser() -> argparse.ArgumentParser:
     anysearch_search_parser.add_argument("--domain", default="")
     anysearch_search_parser.add_argument("--sub-domain", default="")
     anysearch_search_parser.add_argument("--sub-domain-params", default="", help="JSON object forwarded to AnySearch sub_domain_params.")
+    anysearch_search_parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        help="Repeatable key=value entries merged into sub_domain_params.",
+    )
     anysearch_search_parser.add_argument("--max-results", type=int, default=5)
     _add_format_args(anysearch_search_parser)
 

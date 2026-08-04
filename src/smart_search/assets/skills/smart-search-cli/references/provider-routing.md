@@ -104,10 +104,13 @@ AnySearch:
 - AnySearch uses JSON-RPC 2.0 `tools/call` at `ANYSEARCH_API_URL`, default `https://api.anysearch.com/mcp`.
 - `ANYSEARCH_API_KEY` is optional. If configured, requests include `Authorization: Bearer ...`; if missing, anonymous requests are allowed.
 - `ANYSEARCH_TIMEOUT_SECONDS` defaults to `30`.
+- Live MCP tools are `search`, `batch_search`, `extract`, and `get_sub_domains`. `anysearch-domains` maps to `get_sub_domains` (not the removed `list_domains` tool).
+- `anysearch-domains DOMAIN` calls the live `get_sub_domains` tool; without `DOMAIN`, it reads the `tools/list` schema for the available domains.
 - HTTP 200 responses with `result.isError=true` must return `ok=false`, `error_type=provider_error`, and no successful source results.
 - Markdown URL/title/snippet candidates should be parsed into `results`, while raw text remains in `content` and `raw_content`.
 - Structured results without URLs must be preserved as raw/structured evidence, not dropped.
-- Dotted vertical domain shorthand such as `code.doc` is allowed for simple subdomains and must be normalized to `domain=code` plus `sub_domain=doc`; parameterized subdomains use explicit `--domain`, `--sub-domain`, and `--sub-domain-params` JSON before calling AnySearch.
+- Dotted vertical domain shorthand such as `code.doc` is allowed for simple subdomains and must be normalized to `domain=code` plus `sub_domain=doc`; parameterized subdomains use explicit `--domain`, `--sub-domain`, and `--sub-domain-params` JSON and/or repeatable `--param KEY=VALUE`, with repeatable params overriding matching JSON keys.
+- `anysearch-extract --max-length` truncates successful results locally; the live `extract` tool only accepts `url`.
 - `anysearch-batch` accepts at most 5 CLI query strings and returns `error_type=parameter_error` without sending a request when the limit is exceeded.
 
 Sciverse:

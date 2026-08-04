@@ -2596,6 +2596,8 @@ def test_anysearch_commands_use_service_wrappers(monkeypatch, capsys):
         == cli.EXIT_OK
     )
     assert json.loads(capsys.readouterr().out)["query"] == "CVE-2024-3094"
+    assert cli.main(["as", "query", "--param", "type=cve", "--param", "value=CVE-1"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["query"] == "query"
     assert cli.main(["as-extract", "https://example.com", "--max-length", "123"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["url"] == "https://example.com"
     assert cli.main(["as-batch", "a", "b", "--max-results", "1"]) == cli.EXIT_OK
@@ -2604,6 +2606,7 @@ def test_anysearch_commands_use_service_wrappers(monkeypatch, capsys):
     assert calls == [
         ("domains", "security"),
         ("search", "CVE-2024-3094", "security", "vuln", 2, {"type": "cve", "value": "CVE-2024-3094"}),
+        ("search", "query", "", "", 5, {"type": "cve", "value": "CVE-1"}),
         ("extract", "https://example.com", 123),
         ("batch", ["a", "b"], 1),
     ]
@@ -2620,7 +2623,7 @@ def test_anysearch_search_rejects_invalid_sub_domain_params(monkeypatch, capsys)
     data = json.loads(capsys.readouterr().out)
     assert code == cli.EXIT_PARAMETER_ERROR
     assert data["error_type"] == "parameter_error"
-    assert "--sub-domain-params must be a JSON object" in data["error"]
+    assert "invalid --sub-domain-params JSON" in data["error"]
 
 
 def test_anysearch_search_rejects_array_sub_domain_params(monkeypatch, capsys):
@@ -2635,6 +2638,20 @@ def test_anysearch_search_rejects_array_sub_domain_params(monkeypatch, capsys):
     assert code == cli.EXIT_PARAMETER_ERROR
     assert data["error_type"] == "parameter_error"
     assert data["error"] == "--sub-domain-params must be a JSON object"
+
+
+def test_anysearch_search_rejects_invalid_param_before_service(monkeypatch, capsys):
+    async def should_not_search(*args, **kwargs):
+        raise AssertionError("invalid --param must fail before service call")
+
+    monkeypatch.setattr(cli.service, "anysearch_search", should_not_search)
+
+    for invalid_param in ("missing-equals", "=value"):
+        code = cli.main(["as", "CVE-2024-3094", "--param", invalid_param, "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert code == cli.EXIT_PARAMETER_ERROR
+        assert data["error_type"] == "parameter_error"
+        assert "invalid --param value" in data["error"]
 
 
 def test_sciverse_commands_use_service_wrappers(monkeypatch, capsys):

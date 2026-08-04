@@ -356,12 +356,12 @@ AnySearch 是可选实验配置，不满足也不改变 `standard` 最低配置�
 ```powershell
 smart-search setup --non-interactive --anysearch-api-url "https://api.anysearch.com/mcp" --anysearch-key "your-anysearch-key"
 smart-search anysearch-domains security --format json
-smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --max-results 3 --format json
+smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --param type=cve --param value=CVE-2024-3094 --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
 smart-search anysearch-batch "AAPL" "RAG papers" --max-results 2 --format json
 ```
 
-简单垂直域仍支持点号简写，例如 `code.doc` 会由 CLI 发成 `domain=code` 加 `sub_domain=doc`。需要结构化参数的垂直域应先用 `anysearch-domains` 查看要求，再用拆分形式加 `--sub-domain-params` 传 JSON object。
+简单垂直域仍支持点号简写，例如 `code.doc` 会由 CLI 发成 `domain=code` 加 `sub_domain=doc`。需要结构化参数的垂直域应先用 `anysearch-domains` 查看要求，再用拆分形式加 `--sub-domain-params` JSON object 和/或重复 `--param key=value`；重复参数会覆盖 JSON 中同名键。`anysearch-domains DOMAIN` 会调用 live `get_sub_domains`；省略 `DOMAIN` 时读取其 `tools/list` schema。`anysearch-extract --max-length` 只在本地截断成功响应，并且上游只发送 `url`。
 
 Sciverse 也是可选实验配置，不满足也不改变 `standard` 最低配置：
 
@@ -490,7 +490,7 @@ smart-search zhipu-search "今天国内 AI 新闻" --search-engine search_pro_so
 smart-search zhipu-mcp-search "今天国内 AI 新闻" --count 5 --format json
 smart-search zhipu-mcp-reader "https://example.com/source" --format json
 smart-search zhipu-mcp-search-doc "owner/repo" "install" --format json
-smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --max-results 3 --format json
+smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --param type=cve --param value=CVE-2024-3094 --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
 smart-search sciverse-search "transformer retrieval" --year-from 2020 --page-size 5 --format json
 smart-search sciverse-relations "unique-id-from-search" --relation CITATIONS --format json

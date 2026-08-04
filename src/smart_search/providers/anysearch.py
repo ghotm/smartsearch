@@ -77,6 +77,33 @@ def _batch_query_object(query: str, max_results: int) -> dict[str, Any]:
     return {"query": query, "max_results": max_results}
 
 
+def parse_sub_domain_params(
+    raw_json: str = "",
+    key_values: list[str] | None = None,
+) -> dict[str, Any]:
+    """Parse `--sub-domain-params JSON` and repeatable `--param key=value`."""
+    params: dict[str, Any] = {}
+    raw = (raw_json or "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid --sub-domain-params JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("--sub-domain-params must be a JSON object")
+        params.update(parsed)
+    for item in key_values or []:
+        token = (item or "").strip()
+        if not token or "=" not in token:
+            raise ValueError(f"invalid --param value (expected key=value): {item!r}")
+        key, value = token.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"invalid --param value (empty key): {item!r}")
+        params[key] = value
+    return params
+
+
 class AnySearchProvider(BaseSearchProvider):
     def __init__(self, api_url: str, api_key: str | None = None, timeout: float = 30.0):
         super().__init__(api_url.rstrip("/"), api_key or "")
@@ -141,7 +168,29 @@ class AnySearchProvider(BaseSearchProvider):
         return await self.call_tool("search", arguments)
 
     async def extract(self, url: str, max_length: int = 20000) -> str:
-        return await self.call_tool("extract", {"url": url, "max_length": max_length})
+        # Live extract schema only accepts `url`; truncate locally when requested.
+        raw = await self.call_tool("extract", {"url": url})
+        if max_length is None or max_length <= 0:
+            return raw
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+        if not data.get("ok"):
+            return raw
+        for key in ("content", "raw_content"):
+            value = data.get(key)
+            if isinstance(value, str) and len(value) > max_length:
+                data[key] = value[:max_length]
+        for item in data.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("description", "raw_content"):
+                value = item.get(key)
+                if isinstance(value, str) and len(value) > max_length:
+                    item[key] = value[:max_length]
+        data["max_length"] = max_length
+        return json.dumps(data, ensure_ascii=False, indent=2)
 
     async def batch_search(self, queries: list[str], max_results: int = 3) -> str:
         if len(queries) > 5:
