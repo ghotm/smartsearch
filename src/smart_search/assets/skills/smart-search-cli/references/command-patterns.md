@@ -36,8 +36,8 @@ smart-search context7-docs "/reactjs/react.dev" "useEffect cleanup" --format jso
 smart-search zhipu-search "today China AI news" --count 5 --format json
 smart-search anysearch-domains security --format json
 smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --param type=cve --param value=CVE-2024-3094 --max-results 3 --format json
-smart-search anysearch-search "CVE-2024-3094" --domain security.cve --sub-domain-params '{"type":"cve","value":"CVE-2024-3094"}' --format json
-smart-search anysearch-extract "https://example.com/source" --format json
+smart-search anysearch-search "CVE-2024-3094" --domain security.cve --sub-domain-params '{"type":"legacy","value":"old"}' --param type=cve --param value=CVE-2024-3094 --format json
+smart-search anysearch-extract "https://example.com/source" --max-length 12000 --format json
 smart-search anysearch-batch "AAPL" "RAG papers" --max-results 2 --format json
 smart-search sciverse-catalog --collection papers --format json
 smart-search sciverse-search "transformer retrieval" --year-from 2020 --page-size 5 --format json
@@ -95,6 +95,7 @@ smart-search config set ZHIPU_API_KEY "key" --format json
 smart-search config set ZHIPU_API_URL "https://open.bigmodel.cn/api" --format json
 smart-search config set ZHIPU_SEARCH_ENGINE "search_pro" --format json
 smart-search config set TAVILY_API_URL "https://api.tavily.com" --format json
+smart-search config set TAVILY_ENABLED "false" --format json
 smart-search config set TAVILY_TIMEOUT_SECONDS "45" --format json
 smart-search config set FIRECRAWL_API_URL "https://api.firecrawl.dev/v2" --format json
 smart-search model current --format json
@@ -105,6 +106,8 @@ smart-search regression
 smart-search smoke --mock --format json
 smart-search smoke --mock --format markdown
 ```
+
+`TAVILY_ENABLED=false` is a complete Tavily no-network switch even if `TAVILY_API_KEY` is still saved. It removes Tavily from automatic web-search/fetch routes, makes direct Tavily boundaries and `doctor` local-only, and makes `map` return a configuration error; it does not configure Firecrawl.
 
 ## Short Aliases
 

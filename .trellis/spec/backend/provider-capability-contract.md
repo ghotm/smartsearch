@@ -75,6 +75,7 @@ smart-search anysearch-search QUERY
   [--domain DOMAIN]
   [--sub-domain SUBDOMAIN]
   [--sub-domain-params JSON_OBJECT]
+  [--param KEY=VALUE]
   [--max-results N]
   [--format json|markdown|content]
 smart-search anysearch-extract URL [--max-length N] --format json|markdown|content
@@ -116,8 +117,8 @@ smart-search sciverse-relations UNIQUE_ID
   [--page N]
   [--page-size N]
   [--format json|markdown|content]
-smart-search context7-library NAME [--query QUERY] --format json|markdown|content
-smart-search context7-docs LIBRARY_ID [--query QUERY] --format json|markdown|content
+smart-search context7-library NAME [QUERY] --format json|markdown|content
+smart-search context7-docs LIBRARY_ID QUERY --format json|markdown|content
 ```
 
 Service-level contracts:
@@ -224,6 +225,13 @@ Deep Research planner orchestration:
   extraction fallback; AnySearch only when vertical intent is clear; Sciverse
   remains explicit-only for academic catalog/search/semantic/read/relations and
   must not participate in default `research` fallback.
+- Automatic Context7 candidate resolution must not rely on a fixed library id.
+  It is eligible only when normalized query subject tokens overlap the
+  candidate title or id. Title/id exact and multi-token matches dominate;
+  description, trust, and benchmark values are secondary tie-breakers. When no
+  candidate is eligible, record an empty Context7 docs attempt and permit
+  same-capability Exa fallback. Explicit `context7-library` results
+  and explicit `context7-docs LIBRARY_ID` calls remain transparent.
 - Research final synthesis receives only fetched/read evidence and structured
   source metadata. It must not call web providers again and must not cite
   unfetched discovery candidates as proof. If evidence cannot close, return a
@@ -321,6 +329,14 @@ Provider configuration:
   `JINA_API_KEY` and must fail before network when the key is absent.
 - Jina Reader is not a general `web_search` provider and must not be shown as
   one in docs, setup, doctor, or capability status.
+- `TAVILY_ENABLED` defaults to `true`; only `true`, `1`, and `yes` enable it.
+  When disabled, Tavily is not a configured provider even if `TAVILY_API_KEY`
+  is present.
+- `TAVILY_ENABLED=false` must remove Tavily from `web_search`, `web_fetch`,
+  research, and extra-source registration. Direct Tavily search/extract calls,
+  `doctor`, and smoke must make no Tavily network request; `map` must return a
+  local `config_error`. It must not enable Firecrawl or allow a cross-capability
+  fallback.
 - Legacy main-search keys are unsupported: `SMART_SEARCH_API_URL`,
   `SMART_SEARCH_API_KEY`, `SMART_SEARCH_API_MODE`, `SMART_SEARCH_MODEL`, and
   `SMART_SEARCH_XAI_TOOLS`. `config set` / `config unset` must reject them with
@@ -427,10 +443,17 @@ AnySearch boundary:
 - AnySearch parameterized vertical searches pass `sub_domain_params` as a JSON
   object from the CLI to the provider without string flattening. Normalized
   output may expose parameter keys, but must not echo sensitive values.
+- `--sub-domain-params` is decoded before repeatable `--param KEY=VALUE`
+  entries, and later repeated values override matching JSON keys. Invalid JSON,
+  non-object JSON, a missing `=`, or an empty key must return
+  `error_type=parameter_error` before an AnySearch network call.
 - AnySearch search/extract results must preserve raw markdown/text content.
   URL/title/snippet candidates should be extracted when present, but
   structured evidence without URLs must remain in the result instead of being
   discarded.
+- AnySearch `extract` sends only `{url}` upstream. A positive `--max-length`
+  truncates successful normalized `content`, `raw_content`, and result text
+  fields locally; zero or negative values preserve the successful payload.
 - `anysearch-batch` accepts at most five queries. Reject larger batches before
   sending a network request.
 
@@ -631,6 +654,19 @@ Output contracts:
 - Exa HTTP `400` or `422` failures are parameter errors, not generic network
   errors. The provider should expose `error_type="parameter_error"` so the CLI
   and docs-search fallback path can report bad user arguments accurately.
+- Provider-call boundaries must classify exceptions consistently: HTTP `400` or
+  `422` is `parameter_error`, `401` or `403` is `auth_error`, timeout is
+  `timeout`, `429` is `rate_limited`, `5xx` and request failures are
+  `network_error`, invalid response decoding is `parse_error`, and explicit
+  upstream tool failures are `provider_error`. Unexpected local failures are
+  `runtime_error`. A normal decoded response with no normalized content is an
+  `empty` attempt, not an error attempt.
+- Smoke output must include `status` (`healthy`, `degraded`, or `failed`) and
+  `skipped_cases` in addition to its existing case lists. Healthy and degraded
+  smoke preserve backward-compatible `ok=true` and exit code `0`; failed smoke
+  is `ok=false` and non-zero. Missing optional live checks are skipped, not
+  failed. A configured minimum profile must still report a main-search
+  capability with no reachable configured route as a critical live smoke case.
 - Secrets must be masked or omitted in command output, smoke output, docs, task
   artifacts, and error strings.
 
@@ -643,6 +679,19 @@ Regression and release contracts:
 - Packaged-install regression is an install-health check only. Release
   validation must still run from a source checkout with full pytest-backed
   regression before publishing or tagging a release.
+- Read-only CI must cover exactly Ubuntu Node 18/Python 3.10, Ubuntu Node
+  24/Python 3.12, and Windows Node 22/Python 3.12. It must run npm test,
+  source regression, mock smoke, public/package skill parity, pack dry-run, a
+  real tarball install smoke under a fresh temporary npm prefix, and a
+  committed-diff whitespace check. CI must fetch the first parent and run
+  `git diff --check HEAD^1 HEAD`, with `git diff-tree --check --root -r
+  --no-commit-id HEAD` as the root-commit fallback; a bare `git diff --check`
+  after checkout only checks an empty worktree. It must not publish or request
+  npm provenance credentials.
+- Tarball smoke must assert that `npm pack --json` contains only the assets
+  declared by package metadata, then run the installed wrapper's version,
+  packaged regression fallback, and mock smoke without modifying a global npm
+  prefix.
 - Published npm versions are immutable. Retagging a GitHub release after npm
   publish can update repository history and rerun CI, but it cannot replace the
   already published tarball. If packaged assets must change for installed users,
@@ -652,6 +701,12 @@ Regression and release contracts:
   dist-tag `next`; `N` resets per base version and legacy `-dev.*` versions
   reserve the earlier beta slots. A pushed stable `vX.Y.Z` tag publishes
   `X.Y.Z` with npm dist-tag `latest`.
+- On a `main` push, stable-bump detection must compare the current stable
+  package version with `HEAD^1:package.json`, not only the commit subject, so
+  merge and squash release commits skip automatic beta publication. The legacy
+  `chore(release): bump version to X.Y.Z` subject remains a compatibility
+  fallback. The checkout must fetch the first parent, and npm publishing must
+  use non-cancelling repository-scoped concurrency.
 - Prerelease `vX.Y.Z-beta.N` tags or manual dispatch versions are never allowed
   to publish npm `latest`; they must use `next` or a backfill/non-latest tag.
 - Historical test builds may be backfilled with GitHub Actions
@@ -776,11 +831,15 @@ smart-search doctor --format json
 | AnySearch HTTP 401/403 | Return `error_type: "auth_error"` with a masked/non-secret message |
 | AnySearch timeout | Return `error_type: "timeout"` |
 | AnySearch JSON-RPC `error` object | Return `error_type: "provider_error"` with the provider message |
+| AnySearch `--sub-domain-params` / `--param` is invalid | Return `error_type: "parameter_error"` before a network request |
 | `anysearch-batch` receives more than five queries | Return `error_type: "parameter_error"` without a network request |
 | Exa `--include-domains` / `--exclude-domains` receives comma-separated, whitespace-separated, or PowerShell-split values | Normalize to a flat domain list before sending `includeDomains` / `excludeDomains` to Exa |
 | Exa returns HTTP 400 or 422 | Return `error_type: "parameter_error"` and preserve the Exa response body excerpt for diagnosis |
 | Provider HTTP/network/timeout/schema error | Record `provider_attempts[].status="error"` and try next same-capability provider when fallback is `auto` |
 | Provider returns empty normalized result | Record `status="empty"` and try next same-capability provider when fallback is `auto` |
+| `TAVILY_ENABLED=false` with a saved Tavily key | Remove Tavily from configured capability routes; direct Tavily boundaries, doctor, and smoke make no Tavily network call; `map` returns local `config_error` |
+| Tavily or Firecrawl raises while another same-capability provider is available | Record a classified `error` attempt rather than swallowing it; keep fallback within the capability |
+| Live smoke lacks an optional provider/check | Add a skipped case and derive overall `healthy`/`degraded`/`failed` status from case outcomes without changing healthy/degraded exit `0` behavior |
 | `--fallback off` | Try only the first matching provider in the capability chain |
 | `research --fallback off` | Try only the first selected provider inside each capability route and report gaps rather than continuing through same-capability fallback |
 | Docs intent is false | Do not invoke Context7 or Exa as generic web-search fallback |
@@ -959,6 +1018,11 @@ When this contract changes, add or update tests that assert:
   fallback records them as provider errors rather than empty results;
 - Tavily fetch failure falls back through Jina/Zhipu MCP Reader/Firecrawl as
   configured;
+- `TAVILY_ENABLED=false` suppresses Tavily at capability registration and every
+  direct boundary without making a Tavily request; Firecrawl remains a separate
+  same-capability option;
+- provider exceptions are recorded as classified `error` attempts, while normal
+  empty normalized responses remain `empty` attempts;
 - Jina no-key does not satisfy `web_fetch`, Jina key does, and ReaderLM-v2
   without key reports configuration error;
 - Jina and Remote MCP service wrappers await `_decode_provider_json(...)` and

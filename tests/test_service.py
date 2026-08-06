@@ -556,6 +556,62 @@ def test_context7_candidate_selection_prefers_more_specific_react_ecosystem_libr
     assert selected["id"] == "/react-native/react-native"
 
 
+def test_context7_candidate_selection_keeps_exact_title_and_id_match_after_conversational_prefix():
+    selected = service._select_context7_library_candidate(
+        [
+            {
+                "id": "/acme/needle",
+                "title": "Needle",
+                "description": "Needle reference documentation.",
+                "trust_score": 90,
+            }
+        ],
+        "Please could you show me Needle docs",
+    )
+
+    assert selected["id"] == "/acme/needle"
+
+
+@pytest.mark.parametrize(
+    ("library_id", "title", "query"),
+    [
+        ("/microsoft/csharp", "C#", "C# async API docs"),
+        ("/isocpp/cppreference", "C++", "C++ standard library docs"),
+    ],
+)
+def test_context7_candidate_selection_normalizes_symbolic_library_names(library_id, title, query):
+    selected = service._select_context7_library_candidate(
+        [
+            {
+                "id": library_id,
+                "title": title,
+                "description": f"{title} reference documentation.",
+                "trust_score": 90,
+            }
+        ],
+        query,
+    )
+
+    assert selected["id"] == library_id
+
+
+def test_context7_candidate_selection_rejects_description_only_high_trust_match():
+    selected = service._select_context7_library_candidate(
+        [
+            {
+                "id": "/acme/pruner",
+                "title": "Artifact Pruner",
+                "description": "React useEffect documentation and examples.",
+                "trust_score": 100,
+                "benchmark_score": 100,
+            }
+        ],
+        "React useEffect cleanup docs",
+    )
+
+    assert selected is None
+
+
 @pytest.mark.asyncio
 async def test_research_context7_docs_uses_selected_library(monkeypatch, tmp_path):
     _configure_research_minimum(monkeypatch)
@@ -593,6 +649,92 @@ async def test_research_context7_docs_uses_selected_library(monkeypatch, tmp_pat
     assert result["ok"] is True
     assert docs_calls == ["/reactjs/react.dev"]
     assert result["stage_results"][0]["selected_library_id"] == "/reactjs/react.dev"
+
+
+@pytest.mark.asyncio
+async def test_research_falls_back_to_exa_when_context7_has_no_eligible_candidate(monkeypatch, tmp_path):
+    _configure_research_minimum(monkeypatch)
+
+    async def fake_context7_library(*args, **kwargs):
+        return {
+            "ok": True,
+            "results": [
+                {
+                    "id": "/acme/pruner",
+                    "title": "Artifact Pruner",
+                    "description": "React useEffect documentation and examples.",
+                    "trust_score": 100,
+                }
+            ],
+        }
+
+    async def should_not_fetch_context7_docs(*args, **kwargs):
+        raise AssertionError("an ineligible Context7 candidate must not fetch docs")
+
+    async def fake_exa_search(*args, **kwargs):
+        return {
+            "ok": True,
+            "results": [{"url": "https://react.dev/reference/react/useEffect", "title": "useEffect"}],
+        }
+
+    async def fake_web_search(*args, **kwargs):
+        return [], []
+
+    async def fake_fetch(url, fallback="auto", preferred_order=None):
+        return (
+            {"ok": True, "url": url, "provider": "jina", "content": "# useEffect\nFetched evidence."},
+            [service._attempt("web_fetch", "jina", "ok", time.time(), result_count=1)],
+        )
+
+    monkeypatch.setattr(service, "context7_library", fake_context7_library)
+    monkeypatch.setattr(service, "context7_docs", should_not_fetch_context7_docs)
+    monkeypatch.setattr(service, "exa_search", fake_exa_search)
+    monkeypatch.setattr(service, "_run_web_search_fallback", fake_web_search)
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
+
+    result = await service.research("React useEffect API docs", evidence_dir=str(tmp_path))
+
+    docs_attempts = [attempt for attempt in result["provider_attempts"] if attempt["capability"] == "docs_search"]
+    assert result["ok"] is True
+    assert result["stage_results"][0]["selection_status"] == "no_eligible_candidate"
+    assert [(attempt["provider"], attempt["status"]) for attempt in docs_attempts] == [
+        ("context7", "empty"),
+        ("exa", "ok"),
+    ]
+    assert result["fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_docs_search_falls_back_to_exa_when_context7_has_no_eligible_candidate(monkeypatch):
+    monkeypatch.setenv("CONTEXT7_API_KEY", "ctx-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-secret")
+
+    async def fake_context7_library(*args, **kwargs):
+        return {
+            "ok": True,
+            "results": [
+                {
+                    "id": "/acme/pruner",
+                    "title": "Artifact Pruner",
+                    "description": "React useEffect documentation and examples.",
+                    "trust_score": 100,
+                }
+            ],
+        }
+
+    async def fake_exa_search(*args, **kwargs):
+        return {"ok": True, "results": [{"url": "https://react.dev/reference/react/useEffect", "title": "useEffect"}]}
+
+    monkeypatch.setattr(service, "context7_library", fake_context7_library)
+    monkeypatch.setattr(service, "exa_search", fake_exa_search)
+
+    sources, attempts = await service._run_docs_search_fallback("React useEffect API docs")
+
+    assert sources[0]["provider"] == "exa"
+    assert [(attempt["provider"], attempt["status"]) for attempt in attempts] == [
+        ("context7", "empty"),
+        ("exa", "ok"),
+    ]
 
 
 def test_research_provider_profiles_are_registered_with_capability_boundaries():
@@ -1544,13 +1686,79 @@ async def test_search_reports_primary_provider_http_error(monkeypatch):
     result = await service.search("what is example", extra_sources=1, fallback="off")
 
     assert result["ok"] is False
-    assert result["error_type"] == "network_error"
+    assert result["error_type"] == "parameter_error"
     assert result["primary_api_mode"] == "xai-responses"
     assert "xAI Responses HTTP 422" in result["error"]
     assert "bad tools" in result["error"]
     assert result["sources"] == []
     assert result["primary_sources"] == []
     assert result["extra_sources"] == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_type"),
+    [
+        (400, "parameter_error"),
+        (401, "auth_error"),
+        (403, "auth_error"),
+        (408, "timeout"),
+        (422, "parameter_error"),
+        (429, "rate_limited"),
+        (500, "network_error"),
+    ],
+)
+def test_primary_search_exception_uses_shared_error_taxonomy(status_code, error_type):
+    request = httpx.Request("POST", "https://provider.example.test")
+    response = httpx.Response(status_code, text="provider detail", request=request)
+    result = service._primary_search_exception_result(
+        time.time(),
+        "session-id",
+        "query",
+        "chat-completions",
+        "OpenAI-compatible",
+        httpx.HTTPStatusError("provider failed", request=request, response=response),
+    )
+
+    assert result["error_type"] == error_type
+    assert result["error"].startswith(f"OpenAI-compatible HTTP {status_code}")
+
+
+def test_primary_search_timeout_uses_shared_error_taxonomy():
+    result = service._primary_search_exception_result(
+        time.time(),
+        "session-id",
+        "query",
+        "chat-completions",
+        "OpenAI-compatible",
+        httpx.TimeoutException("slow request"),
+    )
+
+    assert result["error_type"] == "timeout"
+    assert result["error"] == "OpenAI-compatible slow request"
+
+
+def test_primary_search_exception_redacts_provider_credentials(monkeypatch):
+    api_key = "xai-test-secret"
+    monkeypatch.setenv("XAI_API_KEY", api_key)
+    request = httpx.Request("POST", "https://provider.example.test")
+    response = httpx.Response(
+        401,
+        text=f"Authorization: Bearer upstream-secret; backend repeated {api_key}",
+        request=request,
+    )
+    result = service._primary_search_exception_result(
+        time.time(),
+        "session-id",
+        "query",
+        "chat-completions",
+        "OpenAI-compatible",
+        httpx.HTTPStatusError("provider failed", request=request, response=response),
+    )
+
+    assert result["error_type"] == "auth_error"
+    assert "upstream-secret" not in result["error"]
+    assert api_key not in result["error"]
+    assert "[REDACTED]" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -2493,3 +2701,125 @@ async def test_tavily_doctor_connection_uses_configured_timeout(monkeypatch):
     assert seen["timeout"].write == 10.0
     assert seen["follow_redirects"] is True
     assert seen["verify"] is True
+
+
+@pytest.mark.asyncio
+async def test_tavily_disabled_removes_capability_routes_and_blocks_network_boundaries(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("TAVILY_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+
+    class NeverAsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Tavily disabled paths must not create an HTTP client")
+
+    async def fake_primary_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def fake_primary_connection(api_url, api_key, model):
+        return {"status": "ok", "message": "relay available"}
+
+    monkeypatch.setattr(service.httpx, "AsyncClient", NeverAsyncClient)
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_primary_search)
+    monkeypatch.setattr(service, "_test_primary_connection", fake_primary_connection)
+
+    capability_status = service.get_capability_status()
+    plan = service.build_deep_research_plan("fetch https://example.com")
+    routes = service._research_capability_routes("fetch https://example.com", plan, "auto")
+    search_result = await service.search("provider control", extra_sources=1, validation="fast")
+    fetch_result = await service.fetch("https://example.com")
+    map_result = await service.map_site("https://example.com")
+    doctor_result = await service._test_tavily_connection()
+    smoke_result = await service.smoke("live")
+
+    assert "tavily" not in capability_status["web_search"]["configured"]
+    assert "tavily" not in capability_status["web_fetch"]["configured"]
+    assert "tavily" not in routes["capabilities"]["web_fetch"]["providers"]
+    assert search_result["ok"] is True
+    assert not any(attempt["provider"] == "tavily" for attempt in search_result["provider_attempts"])
+    assert await service.call_tavily_search("query") is None
+    assert await service.call_tavily_extract("https://example.com") is None
+    assert fetch_result["error_type"] == "config_error"
+    assert map_result["error_type"] == "config_error"
+    assert map_result["disabled"] is True
+    assert doctor_result["status"] == "disabled"
+    assert smoke_result["status"] == "healthy"
+    assert "tavily" in smoke_result["skipped_cases"]
+    assert "web fetch fallback chain" in smoke_result["skipped_cases"]
+
+
+@pytest.mark.asyncio
+async def test_tavily_disabled_keeps_firecrawl_in_the_same_fetch_capability(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("TAVILY_ENABLED", "false")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+
+    async def unexpected_tavily(url):
+        raise AssertionError("disabled Tavily must not enter the fetch fallback")
+
+    async def firecrawl_content(url, ctx=None):
+        return "Firecrawl fallback content"
+
+    monkeypatch.setattr(service, "call_tavily_extract", unexpected_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_scrape", firecrawl_content)
+
+    result = await service.fetch("https://example.com")
+
+    assert service.get_capability_status()["web_fetch"]["configured"] == ["firecrawl"]
+    assert result["ok"] is True
+    assert result["provider"] == "firecrawl"
+    assert result["provider_attempts"][-1]["capability"] == "web_fetch"
+
+
+@pytest.mark.asyncio
+async def test_tavily_and_firecrawl_exceptions_are_error_attempts_while_empty_is_empty(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+
+    async def rejected_tavily(query, max_results=6):
+        raise service.ProviderCallError("auth_error", "Tavily credentials rejected")
+
+    async def empty_firecrawl(query, limit=14):
+        return None
+
+    monkeypatch.setattr(service, "call_tavily_search", rejected_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_search", empty_firecrawl)
+
+    sources, attempts = await service._run_web_search_fallback("query")
+
+    assert sources == []
+    assert [(attempt["provider"], attempt["status"], attempt["error_type"]) for attempt in attempts] == [
+        ("tavily", "error", "auth_error"),
+        ("firecrawl", "empty", ""),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_extra_source_failures_are_recorded_without_hiding_them(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+
+    async def fake_primary_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def failing_tavily(query, max_results=6):
+        raise service.ProviderCallError("rate_limited", "Tavily rate limited")
+
+    async def empty_firecrawl(query, limit=14):
+        return None
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_primary_search)
+    monkeypatch.setattr(service, "call_tavily_search", failing_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_search", empty_firecrawl)
+
+    result = await service.search("provider telemetry", extra_sources=2, validation="fast")
+
+    web_attempts = [attempt for attempt in result["provider_attempts"] if attempt["capability"] == "web_search"]
+    assert result["ok"] is True
+    assert [(attempt["provider"], attempt["status"], attempt["error_type"]) for attempt in web_attempts] == [
+        ("tavily", "error", "rate_limited"),
+        ("firecrawl", "empty", ""),
+    ]

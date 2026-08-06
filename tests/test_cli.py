@@ -345,7 +345,10 @@ def test_fetch_content_format_matches_markdown_body(monkeypatch, capsys):
 
 
 def test_context7_docs_content_format_outputs_content(monkeypatch, capsys):
+    calls = []
+
     async def fake_context7_docs(library_id, query):
+        calls.append((library_id, query))
         return {"ok": True, "provider": "context7-docs", "library_id": library_id, "query": query, "content": "中文文档内容"}
 
     monkeypatch.setattr(cli.service, "context7_docs", fake_context7_docs)
@@ -354,6 +357,27 @@ def test_context7_docs_content_format_outputs_content(monkeypatch, capsys):
 
     assert code == cli.EXIT_OK
     assert capsys.readouterr().out == "中文文档内容\n"
+    assert calls == [("/reactjs/react.dev", "hooks")]
+
+
+def test_context7_library_explicit_command_keeps_unfiltered_candidates(monkeypatch, capsys):
+    candidates = [
+        {"id": "/reactjs/react.dev", "title": "React", "description": "Official React docs."},
+        {"id": "/acme/react-helper", "title": "React Helper", "description": "A separate package."},
+    ]
+    calls = []
+
+    async def fake_context7_library(name, query):
+        calls.append((name, query))
+        return {"ok": True, "provider": "context7", "query": query, "results": candidates}
+
+    monkeypatch.setattr(cli.service, "context7_library", fake_context7_library)
+
+    code = cli.main(["context7-library", "react", "useEffect", "--format", "json"])
+
+    assert code == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["results"] == candidates
+    assert calls == [("react", "useEffect")]
 
 
 def test_doctor_markdown_outputs_human_health_report(monkeypatch, capsys):
@@ -1033,11 +1057,14 @@ def test_smoke_markdown_and_content_are_human_readable(monkeypatch, capsys):
         return {
             "ok": True,
             "mode": mode,
+            "status": "degraded",
             "failed_cases": [],
             "degraded_cases": ["zhipu search"],
+            "skipped_cases": ["context7 library"],
             "cases": [
                 {"name": "doctor minimum profile", "ok": True},
                 {"name": "zhipu search", "ok": False, "severity": "degraded", "error": "HTTP 429"},
+                {"name": "context7 library", "ok": True, "status": "skipped", "skipped": "CONTEXT7_API_KEY not configured"},
             ],
         }
 
@@ -1051,10 +1078,33 @@ def test_smoke_markdown_and_content_are_human_readable(monkeypatch, capsys):
     assert markdown_code == cli.EXIT_OK
     assert "# Smart Search Smoke" in markdown_out
     assert "zhipu search" in markdown_out
+    assert "DEGRADED" in markdown_out
+    assert "1 skipped" in markdown_out
+    assert "SKIPPED" in markdown_out
     assert not markdown_out.lstrip().startswith("{")
     assert content_code == cli.EXIT_OK
-    assert "Smoke mock OK" in content_out
-    assert "2 cases" in content_out
+    assert "Smoke mock DEGRADED" in content_out
+    assert "3 cases" in content_out
+
+
+def test_failed_smoke_status_returns_nonzero_exit(monkeypatch, capsys):
+    async def fake_smoke(mode="mock"):
+        return {
+            "ok": True,
+            "mode": mode,
+            "status": "failed",
+            "failed_cases": ["doctor minimum profile"],
+            "degraded_cases": [],
+            "skipped_cases": [],
+            "cases": [{"name": "doctor minimum profile", "ok": False, "severity": "critical"}],
+        }
+
+    monkeypatch.setattr(cli.service, "smoke", fake_smoke)
+
+    code = cli.main(["smoke", "--live", "--format", "json"])
+
+    assert code == cli.EXIT_RUNTIME_ERROR
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
 
 
 def test_config_markdown_and_content_are_masked_and_non_json(monkeypatch, capsys):
@@ -2588,7 +2638,11 @@ def test_anysearch_commands_use_service_wrappers(monkeypatch, capsys):
                 "--sub-domain",
                 "vuln",
                 "--sub-domain-params",
-                '{"type":"cve","value":"CVE-2024-3094"}',
+                '{"type":"legacy","source":"json"}',
+                "--param",
+                "type=cve",
+                "--param",
+                "value=CVE-2024-3094",
                 "--max-results",
                 "2",
             ]
@@ -2605,7 +2659,7 @@ def test_anysearch_commands_use_service_wrappers(monkeypatch, capsys):
 
     assert calls == [
         ("domains", "security"),
-        ("search", "CVE-2024-3094", "security", "vuln", 2, {"type": "cve", "value": "CVE-2024-3094"}),
+        ("search", "CVE-2024-3094", "security", "vuln", 2, {"type": "cve", "source": "json", "value": "CVE-2024-3094"}),
         ("search", "query", "", "", 5, {"type": "cve", "value": "CVE-1"}),
         ("extract", "https://example.com", 123),
         ("batch", ["a", "b"], 1),

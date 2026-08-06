@@ -170,6 +170,44 @@ async def test_zhipu_mcp_content_mcp_401_is_auth_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_zhipu_mcp_tool_error_redacts_credentials(monkeypatch):
+    url = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+    leaked_secret = "zmcp-secret"
+    FakeZhipuMCPClient.responses = [
+        _initialize_response(url),
+        httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "isError": True,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"MCP error -401: upstream repeated {leaked_secret}",
+                        }
+                    ],
+                },
+            },
+            request=_request(url),
+        ),
+    ]
+    monkeypatch.setattr("smart_search.providers.zhipu_mcp.httpx.AsyncClient", FakeZhipuMCPClient)
+
+    provider = ZhipuMCPProvider(url, "zmcp-secret")
+    data = json.loads(await provider.web_search("query"))
+
+    rendered = json.dumps(data)
+    assert data["ok"] is False
+    assert data["error_type"] == "auth_error"
+    assert leaked_secret not in rendered
+    assert "[REDACTED]" in data["error"]
+    assert data["content"] == data["error"]
+    assert data["raw_content"] == data["error"]
+
+
+@pytest.mark.asyncio
 async def test_zhipu_mcp_zread_tools_send_expected_arguments(monkeypatch):
     url = "https://open.bigmodel.cn/api/mcp/zread/mcp"
     FakeZhipuMCPClient.responses = [

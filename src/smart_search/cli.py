@@ -242,7 +242,10 @@ def _status_label(value: Any) -> str:
     labels = {
         "ok": "OK",
         "true": "OK",
+        "healthy": "HEALTHY",
+        "degraded": "DEGRADED",
         "configured": "CONFIGURED",
+        "disabled": "DISABLED",
         "warning": "WARN",
         "timeout": "TIMEOUT",
         "error": "ERROR",
@@ -559,12 +562,14 @@ def _format_smoke_markdown(data: dict[str, Any]) -> str:
     cases = data.get("cases") or []
     failed = data.get("failed_cases") or []
     degraded = data.get("degraded_cases") or []
+    skipped = data.get("skipped_cases") or []
+    overall_status = data.get("status") or ("healthy" if data.get("ok") else "failed")
     lines = [
         "# Smart Search Smoke",
         "",
         f"Mode: `{data.get('mode', '')}`",
-        f"Overall: {_status_label(data.get('ok'))}",
-        f"Cases: {len(cases)} total, {len(failed)} failed, {len(degraded)} degraded",
+        f"Overall: {_status_label(overall_status)}",
+        f"Cases: {len(cases)} total, {len(failed)} failed, {len(degraded)} degraded, {len(skipped)} skipped",
     ]
     if cases:
         rows = []
@@ -572,7 +577,7 @@ def _format_smoke_markdown(data: dict[str, Any]) -> str:
             rows.append(
                 [
                     case.get("name", ""),
-                    _status_label(case.get("ok")),
+                    _status_label(case.get("status") or case.get("ok")),
                     case.get("severity", ""),
                     case.get("error") or case.get("error_type") or case.get("skipped", ""),
                 ]
@@ -1098,7 +1103,12 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
         cases = data.get("cases") or []
         failed = data.get("failed_cases") or []
         degraded = data.get("degraded_cases") or []
-        return f"Smoke {data.get('mode', '')} {_status_label(data.get('ok'))}: {len(cases)} cases, {len(failed)} failed, {len(degraded)} degraded\n"
+        skipped = data.get("skipped_cases") or []
+        status = data.get("status") or ("healthy" if data.get("ok") else "failed")
+        return (
+            f"Smoke {data.get('mode', '')} {_status_label(status)}: {len(cases)} cases, "
+            f"{len(failed)} failed, {len(degraded)} degraded, {len(skipped)} skipped\n"
+        )
     if command == "config":
         parts = [f"Config {_status_label(data.get('ok'))}"]
         if data.get("config_file"):
@@ -1234,6 +1244,12 @@ def _write_panel(text: str, lang: str) -> None:
 
 
 def _exit_code(data: dict[str, Any]) -> int:
+    if data.get("mode") in {"mock", "live"}:
+        smoke_status = str(data.get("status") or "").lower()
+        if smoke_status in {"healthy", "degraded"}:
+            return EXIT_OK
+        if smoke_status == "failed" and data.get("ok", False):
+            return EXIT_RUNTIME_ERROR
     if data.get("ok", False):
         return EXIT_OK
     error_type = data.get("error_type")
@@ -3005,7 +3021,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--param",
         action="append",
         default=[],
-        help="Repeatable key=value entries merged into sub_domain_params.",
+        help="Repeatable key=value entries that override matching JSON sub_domain_params keys.",
     )
     anysearch_search_parser.add_argument("--max-results", type=int, default=5)
     _add_format_args(anysearch_search_parser)

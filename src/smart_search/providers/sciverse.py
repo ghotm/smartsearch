@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from .base import BaseSearchProvider
+from ..provider_errors import classify_provider_exception, sanitize_provider_error_message
 
 
 SCIVERSE_DEFAULT_API_URL = "https://api.sciverse.space"
@@ -20,38 +21,14 @@ def _elapsed_ms(start: float) -> float:
 
 
 def _sanitize_message(message: str, token: str = "") -> str:
-    text = str(message or "")
-    if token:
-        text = text.replace(token, "[masked]")
-    return text[:300]
+    return sanitize_provider_error_message(message, additional_secrets=(token,))
 
 
 def _error_payload(exc: Exception, token: str = "") -> dict[str, str]:
-    if isinstance(exc, httpx.HTTPStatusError):
-        status_code = exc.response.status_code
-        if status_code in {401, 403}:
-            error_type = "auth_error"
-        elif status_code == 400:
-            error_type = "parameter_error"
-        elif status_code == 404:
-            error_type = "provider_error"
-        elif status_code == 429:
-            error_type = "rate_limited"
-        elif status_code in {502, 503}:
-            error_type = "network_error"
-        else:
-            error_type = "network_error"
-        body = _sanitize_message(exc.response.text or exc.response.reason_phrase or "", token)
-        return {"error_type": error_type, "error": f"HTTP {status_code}: {body}"}
-    if isinstance(exc, httpx.TimeoutException):
-        return {"error_type": "timeout", "error": "request timed out"}
-    if isinstance(exc, httpx.RequestError):
-        return {"error_type": "network_error", "error": _sanitize_message(str(exc), token)}
-    if isinstance(exc, json.JSONDecodeError):
-        return {"error_type": "parse_error", "error": "response was not valid JSON"}
     if isinstance(exc, SciverseSchemaError):
         return {"error_type": "parse_error", "error": _sanitize_message(str(exc), token)}
-    return {"error_type": "runtime_error", "error": _sanitize_message(str(exc), token)}
+    error_type, error = classify_provider_exception(exc)
+    return {"error_type": error_type, "error": _sanitize_message(error, token)}
 
 
 def _config_error(tool: str, **extra: Any) -> str:

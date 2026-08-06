@@ -149,6 +149,36 @@ async def test_context7_provider_normalizes_library_results(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_context7_provider_uses_shared_http_error_taxonomy(monkeypatch):
+    class FakeAsyncClient:
+        def __init__(self, timeout, follow_redirects=True):
+            self.timeout = timeout
+            self.follow_redirects = follow_redirects
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, endpoint, headers):
+            return httpx.Response(
+                422,
+                json={"error": "invalid library id"},
+                request=httpx.Request("GET", endpoint),
+            )
+
+    monkeypatch.setattr("smart_search.providers.context7.httpx.AsyncClient", FakeAsyncClient)
+    provider = Context7Provider("https://context7.com", "key")
+
+    data = json.loads(await provider.docs("/invalid", "hooks"))
+
+    assert data["ok"] is False
+    assert data["error_type"] == "parameter_error"
+    assert "HTTP 422" in data["error"]
+
+
+@pytest.mark.asyncio
 async def test_exa_provider_reports_bad_request_as_parameter_error(monkeypatch):
     class FakeAsyncClient:
         def __init__(self, timeout):

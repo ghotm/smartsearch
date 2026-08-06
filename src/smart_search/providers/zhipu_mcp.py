@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from ..provider_errors import classify_provider_exception, sanitize_provider_error_message
+
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -16,24 +18,14 @@ class ZhipuMCPSessionError(Exception):
     pass
 
 
-def _error_payload(exc: Exception) -> dict[str, str]:
+def _error_payload(exc: Exception, api_key: str = "") -> dict[str, str]:
     if isinstance(exc, ZhipuMCPSessionError):
-        return {"error_type": "provider_error", "error": str(exc)}
-    if isinstance(exc, httpx.HTTPStatusError):
-        status_code = exc.response.status_code
-        if status_code in {401, 403}:
-            error_type = "auth_error"
-        elif status_code == 429:
-            error_type = "rate_limited"
-        else:
-            error_type = "network_error"
-        body = (exc.response.text or exc.response.reason_phrase or "")[:300]
-        return {"error_type": error_type, "error": f"HTTP {status_code}: {body}"}
-    if isinstance(exc, httpx.TimeoutException):
-        return {"error_type": "timeout", "error": "request timed out"}
-    if isinstance(exc, httpx.RequestError):
-        return {"error_type": "network_error", "error": str(exc)}
-    return {"error_type": "runtime_error", "error": str(exc)}
+        return {
+            "error_type": "provider_error",
+            "error": sanitize_provider_error_message(str(exc), additional_secrets=(api_key,)),
+        }
+    error_type, error = classify_provider_exception(exc, additional_secrets=(api_key,))
+    return {"error_type": error_type, "error": error}
 
 
 def _mask_secret(text: str, secret: str) -> str:
@@ -212,7 +204,7 @@ class ZhipuMCPProvider:
                 data = _parse_sse_or_json(response)
             output = self._normalize_response(name, arguments, data, start)
         except Exception as e:
-            error = _error_payload(e)
+            error = _error_payload(e, self.api_key)
             output = {
                 "ok": False,
                 "provider": self.provider_id,
@@ -227,12 +219,15 @@ class ZhipuMCPProvider:
         if "error" in data:
             error = data.get("error") or {}
             message = error.get("message") if isinstance(error, dict) else str(error)
+            safe_error = sanitize_provider_error_message(
+                message or "Zhipu MCP JSON-RPC error", additional_secrets=(self.api_key,)
+            )
             return {
                 "ok": False,
                 "provider": self.provider_id,
                 "tool": name,
                 "error_type": "provider_error",
-                "error": message or "Zhipu MCP JSON-RPC error",
+                "error": safe_error,
                 "elapsed_ms": _elapsed_ms(start),
             }
 
@@ -259,7 +254,13 @@ class ZhipuMCPProvider:
             output["total"] = len(results)
         if is_error:
             output["error_type"] = content_error[0] if content_error else "provider_error"
-            output["error"] = content_error[1] if content_error else (text or "Zhipu MCP tool returned isError=true")
+            safe_error = sanitize_provider_error_message(
+                content_error[1] if content_error else (text or "Zhipu MCP tool returned isError=true"),
+                additional_secrets=(self.api_key,),
+            )
+            output["content"] = safe_error
+            output["raw_content"] = safe_error
+            output["error"] = safe_error
         return output
 
     async def web_search(self, query: str, count: int = 5) -> str:

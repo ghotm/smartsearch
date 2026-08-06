@@ -158,12 +158,42 @@ async def test_anysearch_extract_omits_max_length_and_truncates_locally(monkeypa
     assert data["ok"] is True
     assert FakeAnySearchClient.calls[0]["json"]["params"]["arguments"] == {"url": "https://example.com"}
     assert data["content"] == "ABCDEFGHIJ"
+    assert data["raw_content"] == "ABCDEFGHIJ"
+    assert data["results"][0]["description"] == "ABCDEFGHIJ"
+    assert data["results"][0]["raw_content"] == "ABCDEFGHIJ"
     assert data["max_length"] == 10
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_length", [0, -1])
+async def test_anysearch_extract_non_positive_max_length_preserves_normalized_payload(monkeypatch, max_length):
+    FakeAnySearchClient.response = httpx.Response(
+        200,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}]},
+        },
+        request=httpx.Request("POST", "https://api.anysearch.com/mcp"),
+    )
+    monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
+
+    provider = AnySearchProvider("https://api.anysearch.com/mcp", "as-test-secret")
+    data = json.loads(await provider.extract("https://example.com", max_length=max_length))
+
+    assert FakeAnySearchClient.calls[0]["json"]["params"]["arguments"] == {"url": "https://example.com"}
+    assert data["content"] == "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    assert data["raw_content"] == "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    assert data["results"][0]["description"] == "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    assert "max_length" not in data
+
+
 def test_parse_sub_domain_params_merges_json_and_key_values():
-    params = parse_sub_domain_params('{"type":"cve"}', ["value=CVE-2024-3094", "extra=1"])
-    assert params == {"type": "cve", "value": "CVE-2024-3094", "extra": "1"}
+    params = parse_sub_domain_params(
+        '{"type":"legacy","source":"json"}',
+        ["type=cve", "value=CVE-2024-3094", "type=final", "extra=1"],
+    )
+    assert params == {"type": "final", "source": "json", "value": "CVE-2024-3094", "extra": "1"}
 
 
 def test_parse_sub_domain_params_rejects_invalid_json():
@@ -241,6 +271,29 @@ async def test_anysearch_result_is_error_is_provider_error_without_sources(monke
 
 
 @pytest.mark.asyncio
+async def test_anysearch_tool_error_redacts_its_configured_key(monkeypatch):
+    api_key = "as-test-secret"
+    FakeAnySearchClient.response = httpx.Response(
+        200,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"isError": True, "content": [{"type": "text", "text": f"denied {api_key}"}]},
+        },
+        request=httpx.Request("POST", "https://api.anysearch.com/mcp"),
+    )
+    monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
+
+    data = json.loads(await AnySearchProvider("https://api.anysearch.com/mcp", api_key).extract("https://example.com"))
+
+    rendered = json.dumps(data)
+    assert data["ok"] is False
+    assert api_key not in rendered
+    assert "[REDACTED]" in data["error"]
+    assert data["raw_content"] == data["error"]
+
+
+@pytest.mark.asyncio
 async def test_anysearch_jsonrpc_error_is_provider_error(monkeypatch):
     FakeAnySearchClient.response = httpx.Response(
         200,
@@ -272,6 +325,33 @@ async def test_anysearch_http_forbidden_maps_to_auth_error(monkeypatch):
     assert data["ok"] is False
     assert data["error_type"] == "auth_error"
     assert "HTTP 403" in data["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error_type"),
+    [
+        (400, "parameter_error"),
+        (408, "timeout"),
+        (422, "parameter_error"),
+        (429, "rate_limited"),
+        (500, "network_error"),
+    ],
+)
+async def test_anysearch_http_errors_use_shared_taxonomy(monkeypatch, status_code, error_type):
+    FakeAnySearchClient.response = httpx.Response(
+        status_code,
+        text="provider detail",
+        request=httpx.Request("POST", "https://api.anysearch.com/mcp"),
+    )
+    monkeypatch.setattr("smart_search.providers.anysearch.httpx.AsyncClient", FakeAnySearchClient)
+
+    provider = AnySearchProvider("https://api.anysearch.com/mcp", "as-test-secret")
+    data = json.loads(await provider.extract("https://example.com"))
+
+    assert data["ok"] is False
+    assert data["error_type"] == error_type
+    assert f"HTTP {status_code}" in data["error"]
 
 
 @pytest.mark.asyncio

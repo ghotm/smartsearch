@@ -6,24 +6,12 @@ from typing import Any
 import httpx
 
 from .base import BaseSearchProvider
+from ..provider_errors import classify_provider_exception, sanitize_provider_error_message
 
 
-def _error_payload(exc: Exception) -> dict[str, str]:
-    if isinstance(exc, httpx.HTTPStatusError):
-        status_code = exc.response.status_code
-        if status_code in {401, 403}:
-            error_type = "auth_error"
-        elif status_code == 429:
-            error_type = "rate_limited"
-        else:
-            error_type = "network_error"
-        body = (exc.response.text or exc.response.reason_phrase or "")[:300]
-        return {"error_type": error_type, "error": f"HTTP {status_code}: {body}"}
-    if isinstance(exc, httpx.TimeoutException):
-        return {"error_type": "timeout", "error": "request timed out"}
-    if isinstance(exc, httpx.RequestError):
-        return {"error_type": "network_error", "error": str(exc)}
-    return {"error_type": "runtime_error", "error": str(exc)}
+def _error_payload(exc: Exception, api_key: str = "") -> dict[str, str]:
+    error_type, error = classify_provider_exception(exc, additional_secrets=(api_key,))
+    return {"error_type": error_type, "error": error}
 
 
 def _extract_text(result: dict[str, Any]) -> str:
@@ -104,6 +92,21 @@ def parse_sub_domain_params(
     return params
 
 
+def _truncate_extract_text_fields(data: dict[str, Any], max_length: int) -> None:
+    fields = ("content", "raw_content", "text", "description", "snippet", "body")
+    for key in fields:
+        value = data.get(key)
+        if isinstance(value, str) and len(value) > max_length:
+            data[key] = value[:max_length]
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        for key in fields:
+            value = item.get(key)
+            if isinstance(value, str) and len(value) > max_length:
+                item[key] = value[:max_length]
+
+
 class AnySearchProvider(BaseSearchProvider):
     def __init__(self, api_url: str, api_key: str | None = None, timeout: float = 30.0):
         super().__init__(api_url.rstrip("/"), api_key or "")
@@ -138,7 +141,7 @@ class AnySearchProvider(BaseSearchProvider):
                 data = response.json()
             output = self._normalize_domain_schema(data, start)
         except Exception as e:
-            error = _error_payload(e)
+            error = _error_payload(e, self.api_key)
             output = {
                 "ok": False,
                 "provider": "anysearch",
@@ -178,17 +181,7 @@ class AnySearchProvider(BaseSearchProvider):
             return raw
         if not data.get("ok"):
             return raw
-        for key in ("content", "raw_content"):
-            value = data.get(key)
-            if isinstance(value, str) and len(value) > max_length:
-                data[key] = value[:max_length]
-        for item in data.get("results") or []:
-            if not isinstance(item, dict):
-                continue
-            for key in ("description", "raw_content"):
-                value = item.get(key)
-                if isinstance(value, str) and len(value) > max_length:
-                    item[key] = value[:max_length]
+        _truncate_extract_text_fields(data, max_length)
         data["max_length"] = max_length
         return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -231,7 +224,7 @@ class AnySearchProvider(BaseSearchProvider):
                 data = response.json()
             output = self._normalize_response(name, arguments, data, start)
         except Exception as e:
-            error = _error_payload(e)
+            error = _error_payload(e, self.api_key)
             output = {
                 "ok": False,
                 "provider": "anysearch",
@@ -251,7 +244,9 @@ class AnySearchProvider(BaseSearchProvider):
                 "provider": "anysearch",
                 "tool": name,
                 "error_type": "provider_error",
-                "error": message or "AnySearch JSON-RPC error",
+                "error": sanitize_provider_error_message(
+                    message or "AnySearch JSON-RPC error", additional_secrets=(self.api_key,)
+                ),
                 "elapsed_ms": round((time.time() - start) * 1000, 2),
             }
 
@@ -285,8 +280,13 @@ class AnySearchProvider(BaseSearchProvider):
         if isinstance(arguments.get("sub_domain_params"), dict):
             output["sub_domain_params_keys"] = sorted(arguments["sub_domain_params"])
         if is_error:
+            safe_error = sanitize_provider_error_message(
+                text or "AnySearch tool returned isError=true", additional_secrets=(self.api_key,)
+            )
+            output["content"] = safe_error
+            output["raw_content"] = safe_error
             output["error_type"] = "provider_error"
-            output["error"] = text or "AnySearch tool returned isError=true"
+            output["error"] = safe_error
         return output
 
     def _normalize_domain_schema(self, data: dict[str, Any], start: float) -> dict[str, Any]:
@@ -298,7 +298,9 @@ class AnySearchProvider(BaseSearchProvider):
                 "provider": "anysearch",
                 "tool": "get_sub_domains",
                 "error_type": "provider_error",
-                "error": message or "AnySearch JSON-RPC error",
+                "error": sanitize_provider_error_message(
+                    message or "AnySearch JSON-RPC error", additional_secrets=(self.api_key,)
+                ),
                 "elapsed_ms": round((time.time() - start) * 1000, 2),
             }
         tools = (data.get("result") or {}).get("tools") or []

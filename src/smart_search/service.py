@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import re
 import tempfile
 import time
@@ -41,6 +42,7 @@ from .providers.sciverse import SciverseProvider
 from .providers.xai_responses import XAIResponsesSearchProvider
 from .providers.zhipu import ZhipuWebSearchProvider
 from .providers.zhipu_mcp import ZhipuMCPProvider
+from .provider_errors import ProviderCallError, classify_provider_exception, provider_call_error, sanitize_provider_error_message
 from .sources import merge_sources, new_session_id, split_answer_and_sources
 from .utils import search_prompt
 
@@ -376,6 +378,23 @@ def _attempt(
     return data
 
 
+def _attempt_from_exception(capability: str, provider: str, start: float, exc: BaseException) -> dict[str, Any]:
+    error_type, error = classify_provider_exception(exc)
+    return _attempt(capability, provider, "error", start, error_type=error_type, error=error)
+
+
+def _attempt_status_for_result(data: dict[str, Any]) -> str:
+    return "error" if data.get("error_type") else "empty"
+
+
+def _tavily_is_enabled() -> bool:
+    return bool(config.tavily_enabled and config.tavily_api_key)
+
+
+def _tavily_disabled_message() -> str:
+    return "Tavily is disabled by TAVILY_ENABLED=false. No Tavily network request was made."
+
+
 def _openai_model_breaker_key(api_url: str, model: str) -> tuple[str, str]:
     return (api_url.rstrip("/"), model)
 
@@ -518,83 +537,101 @@ def _normalize_source_results(results: list[dict] | None, provider: str) -> list
     return normalized
 
 
-_CONTEXT7_PREFERRED_LIBRARY_IDS = {
-    "react": "/reactjs/react.dev",
-    "reactjs": "/reactjs/react.dev",
-    "react.dev": "/reactjs/react.dev",
-}
 _CONTEXT7_LIBRARY_STOPWORDS = {
+    "an",
     "api",
+    "and",
+    "are",
+    "as",
+    "at",
+    "by",
+    "can",
+    "do",
+    "does",
     "docs",
     "doc",
     "documentation",
+    "example",
+    "examples",
+    "for",
+    "from",
+    "get",
     "guide",
     "guides",
+    "how",
+    "in",
+    "into",
+    "is",
     "latest",
     "official",
+    "of",
+    "on",
+    "or",
+    "please",
     "reference",
     "sdk",
+    "show",
+    "the",
+    "this",
+    "to",
     "tutorial",
+    "use",
+    "using",
+    "what",
+    "when",
+    "with",
 }
+# A one-token match present in both title and id remains eligible after
+# harmless query framing, while a one-token single-field match stays below it.
+_CONTEXT7_MIN_SELECTION_SCORE = 120.0
 
 
 def _context7_library_tokens(text: str) -> list[str]:
-    tokens = [token for token in re.findall(r"[a-z0-9]+", text.lower()) if len(token) > 1]
+    normalized = re.sub(r"\bc\s*\+\+", "cplusplus", text.lower())
+    normalized = re.sub(r"\bc\s*#", "csharp", normalized)
+    tokens = [token for token in re.findall(r"[a-z0-9]+", normalized) if len(token) > 1]
     return [token for token in tokens if token not in _CONTEXT7_LIBRARY_STOPWORDS]
 
 
 def _numeric_context7_score(value: Any) -> float:
     try:
-        return float(value or 0)
+        score = float(value or 0)
+        return score if math.isfinite(score) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
 
-def _context7_has_more_specific_preferred_candidate(
-    candidates: list[dict], query_tokens: list[str], preferred_id: str
-) -> bool:
-    query_token_set = set(query_tokens)
-    preferred_family_tokens = set(_context7_library_tokens(preferred_id))
-    for token, candidate_preferred_id in _CONTEXT7_PREFERRED_LIBRARY_IDS.items():
-        if candidate_preferred_id == preferred_id:
-            preferred_family_tokens.update(_context7_library_tokens(token))
-    extra_query_tokens = query_token_set - preferred_family_tokens
-    if not extra_query_tokens:
-        return False
-
-    for item in candidates:
-        library_id = str(item.get("id") or "").lower()
-        if library_id == preferred_id:
-            continue
-        title = str(item.get("title") or "")
-        id_title_tokens = set(_context7_library_tokens(f"{library_id} {title}"))
-        if (preferred_family_tokens & id_title_tokens) and (extra_query_tokens & id_title_tokens):
-            return True
-    return False
-
-
-def _context7_candidate_score(
-    item: dict[str, Any], query_tokens: list[str], skipped_preferred_ids: set[str] | None = None
-) -> float:
-    library_id = str(item.get("id") or "").lower()
-    title = str(item.get("title") or "").lower()
-    description = str(item.get("description") or "").lower()
-    id_title_tokens = set(_context7_library_tokens(f"{library_id} {title}"))
+def _context7_candidate_score(item: dict[str, Any], query_tokens: list[str]) -> float:
+    """Score only candidates that explicitly name a query subject in title/id."""
+    library_id = str(item.get("id") or "")
+    title = str(item.get("title") or "")
+    description = str(item.get("description") or "")
+    id_tokens = set(_context7_library_tokens(library_id))
+    title_tokens = set(_context7_library_tokens(title))
     description_tokens = set(_context7_library_tokens(description))
     query_token_set = set(query_tokens)
-    skipped_preferred_ids = skipped_preferred_ids or set()
+    id_matches = query_token_set & id_tokens
+    title_matches = query_token_set & title_tokens
+    subject_matches = id_matches | title_matches
+    if not subject_matches:
+        return 0.0
+
+    # Earlier query subjects and multi-token title/id matches dominate. This
+    # keeps a high-trust candidate that merely repeats a trailing task word
+    # out of automatic routing.
     score = 0.0
-
-    for token, preferred_id in _CONTEXT7_PREFERRED_LIBRARY_IDS.items():
-        if token in query_token_set and library_id == preferred_id and library_id not in skipped_preferred_ids:
-            score += 100
-
-    if query_tokens and query_tokens[0] in id_title_tokens:
-        score += 35
-    score += len(query_token_set & id_title_tokens) * 12
-    score += len(query_token_set & description_tokens) * 3
-    score += min(_numeric_context7_score(item.get("trust_score")), 100) / 10
-    score += min(_numeric_context7_score(item.get("benchmark_score")), 100) / 20
+    seen_query_tokens: set[str] = set()
+    for index, token in enumerate(query_tokens):
+        if token in seen_query_tokens:
+            continue
+        seen_query_tokens.add(token)
+        if token in subject_matches:
+            score += max(80.0, 140.0 - index * 20.0)
+    score += len(title_matches) * 25.0
+    score += len(id_matches) * 15.0
+    score += min(len(query_token_set & description_tokens), 3) / 10
+    score += min(max(_numeric_context7_score(item.get("trust_score")), 0), 100) / 1000
+    score += min(max(_numeric_context7_score(item.get("benchmark_score")), 0), 100) / 2000
     return score
 
 
@@ -605,19 +642,11 @@ def _select_context7_library_candidate(results: list[dict] | None, query: str) -
     candidates = [item for item in results or [] if item.get("id")]
     if not candidates:
         return None
-    skipped_preferred_ids = {
-        preferred_id
-        for token, preferred_id in _CONTEXT7_PREFERRED_LIBRARY_IDS.items()
-        if token in query_tokens and _context7_has_more_specific_preferred_candidate(candidates, query_tokens, preferred_id)
-    }
-    scored = sorted(
-        ((_context7_candidate_score(item, query_tokens, skipped_preferred_ids), item) for item in candidates),
-        key=lambda pair: pair[0],
-        reverse=True,
-    )
-    if scored[0][0] <= 0:
+    scored = [(_context7_candidate_score(item, query_tokens), item) for item in candidates]
+    score, selected = max(scored, key=lambda pair: pair[0])
+    if score < _CONTEXT7_MIN_SELECTION_SCORE:
         return None
-    return scored[0][1]
+    return selected
 
 
 def _provider_names_from_attempts(attempts: list[dict]) -> list[str]:
@@ -680,7 +709,7 @@ def _provider_configured(provider: str) -> bool:
     if provider == "zhipu-mcp":
         return bool(config.zhipu_mcp_api_key)
     if provider == "tavily":
-        return bool(config.tavily_api_key)
+        return _tavily_is_enabled()
     if provider == "jina":
         return bool(config.jina_api_key)
     if provider == "zhipu-mcp-reader":
@@ -1386,7 +1415,6 @@ async def research(
             if provider == "context7":
                 data = await context7_library(question, question)
                 if data.get("ok") and data.get("results"):
-                    provider_attempts.append(_attempt("docs_search", "context7", "ok", step_start, result_count=len(data.get("results") or [])))
                     selected_library = _select_context7_library_candidate(data.get("results"), question)
                     library_id = (selected_library or {}).get("id", "")
                     stage_results.append(
@@ -1396,8 +1424,15 @@ async def research(
                             "ok": bool(library_id),
                             "result_count": len(data.get("results") or []),
                             "selected_library_id": library_id,
+                            "selection_status": "selected" if library_id else "no_eligible_candidate",
                         }
                     )
+                    if not library_id:
+                        provider_attempts.append(_attempt("docs_search", "context7", "empty", step_start))
+                        if fallback_mode == "off":
+                            break
+                        continue
+                    provider_attempts.append(_attempt("docs_search", "context7", "ok", step_start, result_count=1))
                     if library_id:
                         docs_start = time.time()
                         docs_data = await context7_docs(library_id, question)
@@ -1563,10 +1598,10 @@ def get_capability_status() -> dict[str, Any]:
             "configured": [
                 name
                 for name, enabled in [
-                    ("zhipu", bool(config.zhipu_api_key)),
-                    ("zhipu-mcp", bool(config.zhipu_mcp_api_key)),
-                    ("tavily", bool(config.tavily_api_key)),
-                    ("firecrawl", bool(config.firecrawl_api_key)),
+                    ("zhipu", _provider_configured("zhipu")),
+                    ("zhipu-mcp", _provider_configured("zhipu-mcp")),
+                    ("tavily", _provider_configured("tavily")),
+                    ("firecrawl", _provider_configured("firecrawl")),
                 ]
                 if enabled
             ],
@@ -1576,8 +1611,8 @@ def get_capability_status() -> dict[str, Any]:
             "configured": [
                 name
                 for name, enabled in [
-                    ("context7", bool(config.context7_api_key)),
-                    ("exa", bool(config.exa_api_key)),
+                    ("context7", _provider_configured("context7")),
+                    ("exa", _provider_configured("exa")),
                 ]
                 if enabled
             ],
@@ -1587,10 +1622,10 @@ def get_capability_status() -> dict[str, Any]:
             "configured": [
                 name
                 for name, enabled in [
-                    ("tavily", bool(config.tavily_api_key)),
-                    ("jina", bool(config.jina_api_key)),
-                    ("zhipu-mcp-reader", bool(config.zhipu_mcp_api_key)),
-                    ("firecrawl", bool(config.firecrawl_api_key)),
+                    ("tavily", _provider_configured("tavily")),
+                    ("jina", _provider_configured("jina")),
+                    ("zhipu-mcp-reader", _provider_configured("zhipu-mcp-reader")),
+                    ("firecrawl", _provider_configured("firecrawl")),
                 ]
                 if enabled
             ],
@@ -1805,13 +1840,13 @@ async def _run_web_fetch_fallback(
 ) -> tuple[dict[str, Any] | None, list[dict]]:
     attempts: list[dict] = []
     providers = []
-    if config.tavily_api_key:
+    if _provider_configured("tavily"):
         providers.append("tavily")
-    if config.jina_api_key:
+    if _provider_configured("jina"):
         providers.append("jina")
-    if config.zhipu_mcp_api_key:
+    if _provider_configured("zhipu-mcp-reader"):
         providers.append("zhipu-mcp-reader")
-    if config.firecrawl_api_key:
+    if _provider_configured("firecrawl"):
         providers.append("firecrawl")
     if preferred_order:
         allowed = {provider for provider in providers}
@@ -1830,14 +1865,14 @@ async def _run_web_fetch_fallback(
                 data = await jina_fetch(url)
                 content = data.get("content") if data.get("ok") else None
                 if not data.get("ok"):
-                    status = "error" if data.get("error_type") in {"auth_error", "config_error", "parameter_error", "quality_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
+                    status = _attempt_status_for_result(data)
                     attempts.append(_attempt("web_fetch", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
                     continue
             elif provider == "zhipu-mcp-reader":
                 data = await zhipu_mcp_reader(url)
                 content = data.get("content") if data.get("ok") else None
                 if not data.get("ok"):
-                    status = "error" if data.get("error_type") in {"auth_error", "config_error", "provider_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
+                    status = _attempt_status_for_result(data)
                     attempts.append(_attempt("web_fetch", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
                     continue
             else:
@@ -1852,7 +1887,7 @@ async def _run_web_fetch_fallback(
                 }, attempts
             attempts.append(_attempt("web_fetch", provider, "empty", start))
         except Exception as e:
-            attempts.append(_attempt("web_fetch", provider, "error", start, error_type="runtime_error", error=str(e)))
+            attempts.append(_attempt_from_exception("web_fetch", provider, start, e))
     return None, attempts
 
 
@@ -1865,13 +1900,13 @@ async def _run_web_search_fallback(
     provider_filter = _parse_provider_filter(providers)
     attempts: list[dict] = []
     configured: list[str] = []
-    if config.zhipu_api_key:
+    if _provider_configured("zhipu"):
         configured.append("zhipu")
-    if config.zhipu_mcp_api_key:
+    if _provider_configured("zhipu-mcp"):
         configured.append("zhipu-mcp")
-    if config.tavily_api_key:
+    if _provider_configured("tavily"):
         configured.append("tavily")
-    if config.firecrawl_api_key:
+    if _provider_configured("firecrawl"):
         configured.append("firecrawl")
     if provider_filter is not None:
         configured = [p for p in configured if p in provider_filter]
@@ -1888,7 +1923,7 @@ async def _run_web_search_fallback(
                     if sources:
                         attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
                         return sources, attempts
-                status = "error" if data.get("error_type") in {"rate_limited", "auth_error", "timeout", "network_error", "runtime_error"} else "empty"
+                status = _attempt_status_for_result(data)
                 attempts.append(_attempt("web_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
             elif provider == "zhipu-mcp":
                 data = await zhipu_mcp_search(query, count=count)
@@ -1897,7 +1932,7 @@ async def _run_web_search_fallback(
                     if sources:
                         attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
                         return sources, attempts
-                status = "error" if data.get("error_type") in {"rate_limited", "auth_error", "timeout", "network_error", "runtime_error", "provider_error"} else "empty"
+                status = _attempt_status_for_result(data)
                 attempts.append(_attempt("web_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
             elif provider == "tavily":
                 results = await call_tavily_search(query, count)
@@ -1914,7 +1949,7 @@ async def _run_web_search_fallback(
                     return sources, attempts
                 attempts.append(_attempt("web_search", provider, "empty", start))
         except Exception as e:
-            attempts.append(_attempt("web_search", provider, "error", start, error_type="runtime_error", error=str(e)))
+            attempts.append(_attempt_from_exception("web_search", provider, start, e))
     return [], attempts
 
 
@@ -1926,9 +1961,9 @@ async def _run_docs_search_fallback(
     provider_filter = _parse_provider_filter(providers)
     attempts: list[dict] = []
     configured: list[str] = []
-    if config.context7_api_key:
+    if _provider_configured("context7"):
         configured.append("context7")
-    if config.exa_api_key:
+    if _provider_configured("exa"):
         configured.append("exa")
     if provider_filter is not None:
         configured = [p for p in configured if p in provider_filter]
@@ -1945,28 +1980,27 @@ async def _run_docs_search_fallback(
                     if sources:
                         attempts.append(_attempt("docs_search", provider, "ok", start, result_count=len(sources)))
                         return sources, attempts
-                status = "error" if data.get("error_type") in {"auth_error", "parameter_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
+                status = _attempt_status_for_result(data)
                 attempts.append(_attempt("docs_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
             elif provider == "context7":
                 data = await context7_library(query, query)
                 if data.get("ok"):
-                    sources = [
-                        {
-                            "url": f"context7:{item.get('id')}",
-                            "title": item.get("title") or item.get("id") or "Context7",
-                            "description": item.get("description") or "",
+                    selected_library = _select_context7_library_candidate(data.get("results"), query)
+                    if selected_library:
+                        source = {
+                            "url": f"context7:{selected_library.get('id')}",
+                            "title": selected_library.get("title") or selected_library.get("id") or "Context7",
+                            "description": selected_library.get("description") or "",
                             "provider": "context7",
                         }
-                        for item in data.get("results", [])
-                        if item.get("id")
-                    ]
-                    if sources:
-                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=len(sources)))
-                        return sources, attempts
-                status = "error" if data.get("error_type") in {"auth_error", "timeout", "network_error", "runtime_error"} else "empty"
-                attempts.append(_attempt("docs_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=1))
+                        return [source], attempts
+                    attempts.append(_attempt("docs_search", provider, "empty", start))
+                else:
+                    status = _attempt_status_for_result(data)
+                    attempts.append(_attempt("docs_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
         except Exception as e:
-            attempts.append(_attempt("docs_search", provider, "error", start, error_type="runtime_error", error=str(e)))
+            attempts.append(_attempt_from_exception("docs_search", provider, start, e))
     return [], attempts
 
 
@@ -1994,17 +2028,36 @@ async def _run_vertical_search_fallback(
                 if sources:
                     attempts.append(_attempt("vertical_search", provider, "ok", start, result_count=len(sources)))
                     return sources, attempts
-            status = "error" if data.get("error_type") in {"auth_error", "provider_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
+            status = _attempt_status_for_result(data)
             attempts.append(_attempt("vertical_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
         except Exception as e:
-            attempts.append(_attempt("vertical_search", provider, "error", start, error_type="runtime_error", error=str(e)))
+            attempts.append(_attempt_from_exception("vertical_search", provider, start, e))
     return [], attempts
 
 
-async def call_tavily_extract(url: str) -> str | None:
-    api_key = config.tavily_api_key
-    if not api_key:
+def _provider_response_object(data: Any, provider: str) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ProviderCallError("parse_error", f"{provider} response is not a JSON object")
+    return data
+
+
+def _provider_tool_error(
+    data: dict[str, Any], provider: str, *, additional_secrets: tuple[str, ...] = ()
+) -> ProviderCallError | None:
+    if data.get("success") is not False and not data.get("error") and not data.get("detail"):
         return None
+    raw_error = data.get("error") or data.get("detail") or f"{provider} reported a tool failure"
+    if isinstance(raw_error, dict):
+        raw_error = raw_error.get("message") or raw_error.get("detail") or json.dumps(raw_error, ensure_ascii=False)
+    return ProviderCallError(
+        "provider_error", str(raw_error)[:300], additional_secrets=additional_secrets
+    )
+
+
+async def call_tavily_extract(url: str) -> str | None:
+    if not _tavily_is_enabled():
+        return None
+    api_key = config.tavily_api_key
     endpoint = f"{config.tavily_api_url.rstrip('/')}/extract"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {"urls": [url], "format": "markdown"}
@@ -2012,19 +2065,30 @@ async def call_tavily_extract(url: str) -> str | None:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(endpoint, headers=headers, json=body)
             response.raise_for_status()
-            data = response.json()
-            if data.get("results") and len(data["results"]) > 0:
-                content = data["results"][0].get("raw_content", "")
-                return content if content and content.strip() else None
-            return None
-    except Exception:
+            data = _provider_response_object(response.json(), "Tavily")
+    except Exception as exc:
+        raise provider_call_error(exc, additional_secrets=(api_key,)) from exc
+    tool_error = _provider_tool_error(data, "Tavily", additional_secrets=(api_key,))
+    if tool_error:
+        raise tool_error
+    results = data.get("results")
+    if not isinstance(results, list):
+        raise ProviderCallError("parse_error", "Tavily extract response is missing results")
+    if not results:
         return None
+    first = results[0]
+    if not isinstance(first, dict):
+        raise ProviderCallError("parse_error", "Tavily extract result is not an object")
+    content = first.get("raw_content", "")
+    if not isinstance(content, str):
+        raise ProviderCallError("parse_error", "Tavily extract content is not text")
+    return content if content.strip() else None
 
 
 async def call_tavily_search(query: str, max_results: int = 6) -> list[dict] | None:
-    api_key = config.tavily_api_key
-    if not api_key:
+    if not _tavily_is_enabled():
         return None
+    api_key = config.tavily_api_key
     endpoint = f"{config.tavily_api_url.rstrip('/')}/search"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {
@@ -2038,19 +2102,28 @@ async def call_tavily_search(query: str, max_results: int = 6) -> list[dict] | N
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(endpoint, headers=headers, json=body)
             response.raise_for_status()
-            data = response.json()
-            results = data.get("results", [])
-            return [
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "content": r.get("content", ""),
-                    "score": r.get("score", 0),
-                }
-                for r in results
-            ] if results else None
-    except Exception:
+            data = _provider_response_object(response.json(), "Tavily")
+    except Exception as exc:
+        raise provider_call_error(exc, additional_secrets=(api_key,)) from exc
+    tool_error = _provider_tool_error(data, "Tavily", additional_secrets=(api_key,))
+    if tool_error:
+        raise tool_error
+    results = data.get("results")
+    if not isinstance(results, list):
+        raise ProviderCallError("parse_error", "Tavily search response is missing results")
+    if not results:
         return None
+    if not all(isinstance(item, dict) for item in results):
+        raise ProviderCallError("parse_error", "Tavily search result is not an object")
+    return [
+        {
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "content": item.get("content", ""),
+            "score": item.get("score", 0),
+        }
+        for item in results
+    ]
 
 
 async def call_firecrawl_search(query: str, limit: int = 14) -> list[dict] | None:
@@ -2064,18 +2137,30 @@ async def call_firecrawl_search(query: str, limit: int = 14) -> list[dict] | Non
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(endpoint, headers=headers, json=body)
             response.raise_for_status()
-            data = response.json()
-            results = data.get("data", {}).get("web", [])
-            return [
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "description": r.get("description", ""),
-                }
-                for r in results
-            ] if results else None
-    except Exception:
+            data = _provider_response_object(response.json(), "Firecrawl")
+    except Exception as exc:
+        raise provider_call_error(exc, additional_secrets=(api_key,)) from exc
+    tool_error = _provider_tool_error(data, "Firecrawl", additional_secrets=(api_key,))
+    if tool_error:
+        raise tool_error
+    payload = data.get("data")
+    if not isinstance(payload, dict):
+        raise ProviderCallError("parse_error", "Firecrawl search response is missing data")
+    results = payload.get("web")
+    if not isinstance(results, list):
+        raise ProviderCallError("parse_error", "Firecrawl search response is missing web results")
+    if not results:
         return None
+    if not all(isinstance(item, dict) for item in results):
+        raise ProviderCallError("parse_error", "Firecrawl search result is not an object")
+    return [
+        {
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "description": item.get("description", ""),
+        }
+        for item in results
+    ]
 
 
 async def call_firecrawl_scrape(url: str, ctx=None) -> str | None:
@@ -2095,14 +2180,21 @@ async def call_firecrawl_scrape(url: str, ctx=None) -> str | None:
             async with httpx.AsyncClient(timeout=90.0) as client:
                 response = await client.post(endpoint, headers=headers, json=body)
                 response.raise_for_status()
-                data = response.json()
-                markdown = data.get("data", {}).get("markdown", "")
-                if markdown and markdown.strip():
-                    return markdown
-                await log_info(ctx, f"Firecrawl: markdown为空, 重试 {attempt + 1}/{config.retry_max_attempts}", config.debug_enabled)
-        except Exception as e:
-            await log_info(ctx, f"Firecrawl error: {e}", config.debug_enabled)
-            return None
+                data = _provider_response_object(response.json(), "Firecrawl")
+        except Exception as exc:
+            raise provider_call_error(exc, additional_secrets=(api_key,)) from exc
+        tool_error = _provider_tool_error(data, "Firecrawl", additional_secrets=(api_key,))
+        if tool_error:
+            raise tool_error
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            raise ProviderCallError("parse_error", "Firecrawl scrape response is missing data")
+        markdown = payload.get("markdown", "")
+        if not isinstance(markdown, str):
+            raise ProviderCallError("parse_error", "Firecrawl scrape content is not text")
+        if markdown.strip():
+            return markdown
+        await log_info(ctx, f"Firecrawl: markdown empty, retry {attempt + 1}/{config.retry_max_attempts}", config.debug_enabled)
     return None
 
 
@@ -2124,6 +2216,13 @@ async def call_tavily_map(
     limit: int = 50,
     timeout: int = 150,
 ) -> dict[str, Any]:
+    if not config.tavily_enabled:
+        return {
+            "ok": False,
+            "error_type": "config_error",
+            "error": _tavily_disabled_message(),
+            "disabled": True,
+        }
     api_key = config.tavily_api_key
     if not api_key:
         return {
@@ -2141,19 +2240,22 @@ async def call_tavily_map(
         async with httpx.AsyncClient(timeout=float(timeout + 10)) as client:
             response = await client.post(endpoint, headers=headers, json=body)
             response.raise_for_status()
-            data = response.json()
-            return {
-                "ok": True,
-                "base_url": data.get("base_url", ""),
-                "results": data.get("results", []),
-                "response_time": data.get("response_time", 0),
-            }
-    except httpx.TimeoutException:
-        return {"ok": False, "error_type": "network_error", "error": f"映射超时: 请求超过{timeout}秒"}
-    except httpx.HTTPStatusError as e:
-        return {"ok": False, "error_type": "network_error", "error": f"HTTP错误: {e.response.status_code} - {e.response.text[:200]}"}
-    except Exception as e:
-        return {"ok": False, "error_type": "network_error", "error": f"映射错误: {str(e)}"}
+            data = _provider_response_object(response.json(), "Tavily")
+        tool_error = _provider_tool_error(data, "Tavily", additional_secrets=(api_key,))
+        if tool_error:
+            raise tool_error
+        results = data.get("results")
+        if not isinstance(results, list):
+            raise ProviderCallError("parse_error", "Tavily map response is missing results")
+        return {
+            "ok": True,
+            "base_url": data.get("base_url", ""),
+            "results": results,
+            "response_time": data.get("response_time", 0),
+        }
+    except Exception as exc:
+        error_type, error = classify_provider_exception(exc, additional_secrets=(api_key,))
+        return {"ok": False, "error_type": error_type, "error": error}
 
 
 async def search(
@@ -2219,8 +2321,8 @@ async def search(
             if provider_config["provider"] == "openai-compatible":
                 provider_config["stream"] = stream
 
-    has_tavily = bool(config.tavily_api_key)
-    has_firecrawl = bool(config.firecrawl_api_key)
+    has_tavily = _provider_configured("tavily")
+    has_firecrawl = _provider_configured("firecrawl")
     tavily_count = 0
     firecrawl_count = 0
     if extra_sources > 0:
@@ -2391,28 +2493,31 @@ async def search(
     primary_api_mode = successful_main_config["mode"]
     effective_model = successful_main_config["model"]
 
-    coros: list[Any] = []
+    extra_calls: list[tuple[str, float, Any]] = []
     if tavily_count:
-        coros.append(call_tavily_search(query, tavily_count))
+        extra_calls.append(("tavily", time.time(), call_tavily_search(query, tavily_count)))
     if firecrawl_count:
-        coros.append(call_firecrawl_search(query, firecrawl_count))
+        extra_calls.append(("firecrawl", time.time(), call_firecrawl_search(query, firecrawl_count)))
 
-    gathered = await asyncio.gather(*coros, return_exceptions=True)
+    gathered = await asyncio.gather(*(call[2] for call in extra_calls), return_exceptions=True)
     primary_result = primary_result or ""
     tavily_results: list[dict] | None = None
     firecrawl_results: list[dict] | None = None
-    idx = 0
-    if tavily_count:
-        tavily_results = None if isinstance(gathered[idx], BaseException) else gathered[idx]
-        idx += 1
-    if firecrawl_count:
-        firecrawl_results = None if isinstance(gathered[idx], BaseException) else gathered[idx]
+    for (provider, attempt_start, _), result in zip(extra_calls, gathered):
+        if isinstance(result, BaseException):
+            provider_attempts.append(_attempt_from_exception("web_search", provider, attempt_start, result))
+            continue
+        if result:
+            if provider == "tavily":
+                tavily_results = result
+            else:
+                firecrawl_results = result
+            provider_attempts.append(_attempt("web_search", provider, "ok", attempt_start, result_count=len(result)))
+        else:
+            provider_attempts.append(_attempt("web_search", provider, "empty", attempt_start))
 
     answer, primary_sources = split_answer_and_sources(primary_result)
     extra_source_items = extra_results_to_sources(tavily_results, firecrawl_results)
-    for item_provider, results in (("tavily", tavily_results), ("firecrawl", firecrawl_results)):
-        if results:
-            provider_attempts.append(_attempt("web_search", item_provider, "ok", start, result_count=len(results)))
 
     supplemental_sources: list[dict] = []
     if validation_level in {"balanced", "strict"}:
@@ -2989,42 +3094,17 @@ def _primary_search_exception_result(
     provider_name: str,
     exc: BaseException,
 ) -> dict[str, Any]:
-    if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError, TimeoutError)):
-        return _primary_search_error_result(
-            start,
-            session_id,
-            query,
-            primary_api_mode,
-            "network_error",
-            f"{provider_name} 请求超时: {str(exc)}",
-        )
-    if isinstance(exc, httpx.HTTPStatusError):
-        body = exc.response.text[:300] if exc.response is not None else str(exc)
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        return _primary_search_error_result(
-            start,
-            session_id,
-            query,
-            primary_api_mode,
-            "network_error",
-            f"{provider_name} HTTP {status}: {body}",
-        )
-    if isinstance(exc, httpx.RequestError):
-        return _primary_search_error_result(
-            start,
-            session_id,
-            query,
-            primary_api_mode,
-            "network_error",
-            f"{provider_name} 网络错误: {str(exc)}",
-        )
+    error_type, error = classify_provider_exception(
+        exc,
+        additional_secrets=(config.xai_api_key, config.openai_compatible_api_key),
+    )
     return _primary_search_error_result(
         start,
         session_id,
         query,
         primary_api_mode,
-        "runtime_error",
-        f"{provider_name} 运行错误: {str(exc)}",
+        error_type,
+        f"{provider_name} {error}",
     )
 
 
@@ -3066,12 +3146,29 @@ async def fetch(url: str) -> dict[str, Any]:
             "elapsed_ms": _elapsed_ms(start),
         }
 
-    if not (config.tavily_api_key or config.jina_api_key or config.zhipu_mcp_api_key or config.firecrawl_api_key):
-        error = "TAVILY_API_KEY、JINA_API_KEY、ZHIPU_MCP_API_KEY 和 FIRECRAWL_API_KEY 均未配置"
+    configured_fetch_providers = [
+        provider
+        for provider in ("tavily", "jina", "zhipu-mcp-reader", "firecrawl")
+        if _provider_configured(provider)
+    ]
+    if not configured_fetch_providers:
+        error = "No enabled web_fetch provider is configured"
+        if config.tavily_api_key and not config.tavily_enabled:
+            error = f"{error}; {_tavily_disabled_message()}"
         error_type = "config_error"
     else:
-        error = "所有提取服务均未能获取内容"
-        error_type = "network_error"
+        failed_attempts = [
+            attempt
+            for attempt in attempts
+            if attempt.get("status") == "error" and attempt.get("error_type")
+        ]
+        if failed_attempts:
+            last_failure = failed_attempts[-1]
+            error_type = str(last_failure.get("error_type") or "network_error")
+            error = str(last_failure.get("error") or "All extract providers failed")
+        else:
+            error = "All extract providers returned empty content"
+            error_type = "network_error"
     return {
         "ok": False,
         "url": url,
@@ -3137,7 +3234,7 @@ async def exa_search(
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return {"ok": False, "error_type": "parse_error", "error": raw}
+        return {"ok": False, "error_type": "parse_error", "error": sanitize_provider_error_message(raw)}
     if not data.get("ok", False):
         data.setdefault("error_type", "network_error")
     return data
@@ -3444,7 +3541,7 @@ async def _test_primary_chat_completion(api_url: str, api_key: str, model: str) 
         if response.status_code != 200:
             return {
                 "status": "warning",
-                "message": f"HTTP {response.status_code}: {response.text[:100]}",
+                "message": f"HTTP {response.status_code}: {sanitize_provider_error_message(response.text, limit=100)}",
                 "response_time_ms": response_time,
                 "http_status": response.status_code,
                 "content_type": content_type,
@@ -3625,9 +3722,15 @@ async def _probe_openai_compatible_search_shape(
                 stream=stream,
             )
     except httpx.TimeoutException as e:
-        return _diagnose_check_result(name=name, status="timeout", message=f"请求超时: {e}", start=start, stream=stream)
+        return _diagnose_check_result(
+            name=name,
+            status="timeout",
+            message=f"请求超时: {sanitize_provider_error_message(e)}",
+            start=start,
+            stream=stream,
+        )
     except httpx.HTTPStatusError as e:
-        body = e.response.text[:200] if e.response is not None else str(e)
+        body = sanitize_provider_error_message(e.response.text if e.response is not None else e, limit=200)
         status_code = e.response.status_code if e.response is not None else None
         content_type = e.response.headers.get("content-type", "") if e.response is not None else ""
         return _diagnose_check_result(
@@ -3640,9 +3743,21 @@ async def _probe_openai_compatible_search_shape(
             stream=stream,
         )
     except httpx.RequestError as e:
-        return _diagnose_check_result(name=name, status="error", message=f"网络错误: {e}", start=start, stream=stream)
+        return _diagnose_check_result(
+            name=name,
+            status="error",
+            message=f"网络错误: {sanitize_provider_error_message(e)}",
+            start=start,
+            stream=stream,
+        )
     except Exception as e:
-        return _diagnose_check_result(name=name, status="error", message=f"运行错误: {e}", start=start, stream=stream)
+        return _diagnose_check_result(
+            name=name,
+            status="error",
+            message=f"运行错误: {sanitize_provider_error_message(e)}",
+            start=start,
+            stream=stream,
+        )
 
 
 async def diagnose_openai_compatible(timeout_seconds: float = 30.0) -> dict[str, Any]:
@@ -3685,11 +3800,11 @@ async def diagnose_openai_compatible(timeout_seconds: float = 30.0) -> dict[str,
     try:
         quick = await _test_primary_chat_completion(api_url, api_key, model)
     except httpx.TimeoutException as e:
-        quick = {"status": "timeout", "message": f"轻量 chat 请求超时: {e}"}
+        quick = {"status": "timeout", "message": f"轻量 chat 请求超时: {sanitize_provider_error_message(e)}"}
     except httpx.RequestError as e:
-        quick = {"status": "error", "message": f"轻量 chat 网络错误: {e}"}
+        quick = {"status": "error", "message": f"轻量 chat 网络错误: {sanitize_provider_error_message(e)}"}
     except Exception as e:
-        quick = {"status": "error", "message": f"轻量 chat 运行错误: {e}"}
+        quick = {"status": "error", "message": f"轻量 chat 运行错误: {sanitize_provider_error_message(e)}"}
     quick_check = {
         "name": "轻量 chat 请求",
         "status": quick.get("status", "error"),
@@ -3732,7 +3847,11 @@ async def _test_primary_connection(api_url: str, api_key: str, model: str) -> di
             )
             response_time = _elapsed_ms(start)
             if response.status_code != 200:
-                models_test = {"status": "warning", "message": f"HTTP {response.status_code}: {response.text[:100]}", "response_time_ms": response_time}
+                models_test = {
+                    "status": "warning",
+                    "message": f"HTTP {response.status_code}: {sanitize_provider_error_message(response.text, limit=100)}",
+                    "response_time_ms": response_time,
+                }
             else:
                 models_test = {"status": "ok", "message": f"成功获取模型列表 (HTTP {response.status_code})", "response_time_ms": response_time}
                 try:
@@ -3744,7 +3863,11 @@ async def _test_primary_connection(api_url: str, api_key: str, model: str) -> di
                 except Exception:
                     pass
     except httpx.HTTPError as e:
-        models_test = {"status": "warning", "message": f"模型列表接口请求失败: {e}", "response_time_ms": _elapsed_ms(start)}
+        models_test = {
+            "status": "warning",
+            "message": f"模型列表接口请求失败: {sanitize_provider_error_message(e)}",
+            "response_time_ms": _elapsed_ms(start),
+        }
 
     if chat_test.get("status") != "ok":
         models_state = "可用" if models_test.get("status") == "ok" else "不可用"
@@ -3792,7 +3915,11 @@ async def _test_primary_responses(api_url: str, api_key: str, model: str) -> dic
         )
         response_time = _elapsed_ms(start)
         if response.status_code != 200:
-            return {"status": "warning", "message": f"HTTP {response.status_code}: {response.text[:100]}", "response_time_ms": response_time}
+            return {
+                "status": "warning",
+                "message": f"HTTP {response.status_code}: {sanitize_provider_error_message(response.text, limit=100)}",
+                "response_time_ms": response_time,
+            }
         return {"status": "ok", "message": f"xAI Responses API 可用 (HTTP {response.status_code})", "response_time_ms": response_time}
 
 
@@ -3808,9 +3935,15 @@ async def _safe_test_main_provider_connection(provider_config: dict[str, Any]) -
     except httpx.TimeoutException:
         return {"status": "timeout", "message": f"{provider_config['provider']} 请求超时，请检查网络连接或 API URL"}
     except httpx.RequestError as e:
-        return {"status": "error", "message": f"{provider_config['provider']} 网络错误: {str(e)}"}
+        return {
+            "status": "error",
+            "message": f"{provider_config['provider']} 网络错误: {sanitize_provider_error_message(e)}",
+        }
     except Exception as e:
-        return {"status": "error", "message": f"{provider_config['provider']} 未知错误: {str(e)}"}
+        return {
+            "status": "error",
+            "message": f"{provider_config['provider']} 未知错误: {sanitize_provider_error_message(e)}",
+        }
 
 
 async def _test_exa_connection() -> dict[str, Any]:
@@ -3827,10 +3960,16 @@ async def _test_exa_connection() -> dict[str, Any]:
         response_time = _elapsed_ms(start)
         if resp.status_code == 200:
             return {"status": "ok", "message": "Exa API 可用 (HTTP 200)", "response_time_ms": response_time}
-        return {"status": "warning", "message": f"HTTP {resp.status_code}: {resp.text[:100]}", "response_time_ms": response_time}
+        return {
+            "status": "warning",
+            "message": f"HTTP {resp.status_code}: {sanitize_provider_error_message(resp.text, limit=100)}",
+            "response_time_ms": response_time,
+        }
 
 
 async def _test_tavily_connection() -> dict[str, Any]:
+    if not config.tavily_enabled:
+        return {"status": "disabled", "message": _tavily_disabled_message()}
     tavily_key = config.tavily_api_key
     if not tavily_key:
         return {"status": "not_configured", "message": "TAVILY_API_KEY 未设置，Tavily 功能不可用"}
@@ -3845,7 +3984,11 @@ async def _test_tavily_connection() -> dict[str, Any]:
         response_time = _elapsed_ms(start)
         if resp.status_code == 200:
             return {"status": "ok", "message": "Tavily API 可用 (HTTP 200)", "response_time_ms": response_time}
-        return {"status": "warning", "message": f"HTTP {resp.status_code}: {resp.text[:100]}", "response_time_ms": response_time}
+        return {
+            "status": "warning",
+            "message": f"HTTP {resp.status_code}: {sanitize_provider_error_message(resp.text, limit=100)}",
+            "response_time_ms": response_time,
+        }
 
 
 async def _test_jina_connection() -> dict[str, Any]:
@@ -3909,31 +4052,31 @@ async def doctor() -> dict[str, Any]:
             info["primary_connection_test"] = {"status": "config_error", "message": MINIMUM_PROFILE_ERROR}
     except ValueError as e:
         info["main_search_connection_tests"] = {}
-        info["primary_connection_test"] = {"status": "config_error", "message": str(e)}
+        info["primary_connection_test"] = {"status": "config_error", "message": sanitize_provider_error_message(e)}
     except Exception as e:
         info["main_search_connection_tests"] = {}
-        info["primary_connection_test"] = {"status": "error", "message": f"未知错误: {str(e)}"}
+        info["primary_connection_test"] = {"status": "error", "message": f"未知错误: {sanitize_provider_error_message(e)}"}
 
     try:
         info["exa_connection_test"] = await _test_exa_connection()
     except httpx.TimeoutException:
         info["exa_connection_test"] = {"status": "timeout", "message": "Exa API 请求超时"}
     except Exception as e:
-        info["exa_connection_test"] = {"status": "error", "message": str(e)}
+        info["exa_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
 
     try:
         info["tavily_connection_test"] = await _test_tavily_connection()
     except httpx.TimeoutException:
         info["tavily_connection_test"] = {"status": "timeout", "message": "Tavily API 请求超时"}
     except Exception as e:
-        info["tavily_connection_test"] = {"status": "error", "message": str(e)}
+        info["tavily_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
 
     try:
         info["jina_connection_test"] = await _test_jina_connection()
     except httpx.TimeoutException:
         info["jina_connection_test"] = {"status": "timeout", "message": "Jina Reader 请求超时"}
     except Exception as e:
-        info["jina_connection_test"] = {"status": "error", "message": str(e)}
+        info["jina_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
 
     if config.firecrawl_api_key:
         info["firecrawl_connection_test"] = {"status": "configured", "message": "FIRECRAWL_API_KEY 已设置"}
@@ -3945,21 +4088,21 @@ async def doctor() -> dict[str, Any]:
     except httpx.TimeoutException:
         info["zhipu_connection_test"] = {"status": "timeout", "message": "智谱 API 请求超时"}
     except Exception as e:
-        info["zhipu_connection_test"] = {"status": "error", "message": str(e)}
+        info["zhipu_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
 
     try:
         info["zhipu_mcp_connection_test"] = await _test_zhipu_mcp_connection()
     except httpx.TimeoutException:
         info["zhipu_mcp_connection_test"] = {"status": "timeout", "message": "智谱 Coding Plan MCP 请求超时"}
     except Exception as e:
-        info["zhipu_mcp_connection_test"] = {"status": "error", "message": str(e)}
+        info["zhipu_mcp_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
 
     try:
         info["context7_connection_test"] = await _test_context7_connection()
     except httpx.TimeoutException:
         info["context7_connection_test"] = {"status": "timeout", "message": "Context7 API 请求超时"}
     except Exception as e:
-        info["context7_connection_test"] = {"status": "error", "message": str(e)}
+        info["context7_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
 
     minimum = validate_minimum_profile()
     info["capability_status"] = minimum.get("capability_status", get_capability_status())
@@ -4064,6 +4207,22 @@ def _case(name: str, ok: bool, details: dict[str, Any] | None = None) -> dict[st
 
 def _case_failed(case: dict[str, Any]) -> bool:
     return not case.get("ok") and case.get("severity", "critical") != "degraded"
+
+
+def _skipped_case(name: str, reason: str) -> dict[str, Any]:
+    return _case(name, True, {"status": "skipped", "skipped": reason})
+
+
+def _smoke_case_summary(cases: list[dict[str, Any]]) -> tuple[list[str], list[str], list[str], str]:
+    failed = [case["name"] for case in cases if _case_failed(case)]
+    degraded = [case["name"] for case in cases if not case.get("ok") and case.get("severity") == "degraded"]
+    skipped = [
+        case["name"]
+        for case in cases
+        if case.get("status") == "skipped" or bool(case.get("skipped"))
+    ]
+    status = "failed" if failed else ("degraded" if degraded else "healthy")
+    return failed, degraded, skipped, status
 
 
 async def _smoke_mock(start: float) -> dict[str, Any]:
@@ -4377,11 +4536,14 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
     all_attempts: list[dict] = []
     for c in cases:
         all_attempts.extend(c.get("provider_attempts", []))
-    failed = [c["name"] for c in cases if _case_failed(c)]
+    failed, degraded, skipped, status = _smoke_case_summary(cases)
     return {
-        "ok": not failed,
+        "ok": status != "failed",
         "mode": "mock",
+        "status": status,
         "failed_cases": failed,
+        "degraded_cases": degraded,
+        "skipped_cases": skipped,
         "cases": cases,
         "provider_attempts": all_attempts,
         "providers_used": _provider_names_from_attempts(all_attempts),
@@ -4406,6 +4568,29 @@ async def _smoke_live(start: float) -> dict[str, Any]:
         )
     )
 
+    # A configured minimum profile is necessary but not sufficient for a live
+    # smoke pass: doctor has already probed the configured main-search route
+    # chain. Do not downgrade that required path to a merely configured check.
+    if doctor_result.get("minimum_profile_ok"):
+        primary_status = doctor_result.get("primary_connection_test", {})
+        main_connection_tests = doctor_result.get("main_search_connection_tests", {})
+        available_providers = [
+            provider
+            for provider, connection in main_connection_tests.items()
+            if isinstance(connection, dict) and connection.get("status") == "ok"
+        ]
+        cases.append(
+            _case(
+                "main search connection",
+                bool(doctor_result.get("ok")),
+                {
+                    "status": "ok" if doctor_result.get("ok") else primary_status.get("status", ""),
+                    "error": "" if doctor_result.get("ok") else primary_status.get("message", ""),
+                    "available_providers": available_providers,
+                },
+            )
+        )
+
     zhipu_status = doctor_result.get("zhipu_connection_test", {})
     if config.zhipu_api_key:
         zhipu_ok = zhipu_status.get("status") == "ok"
@@ -4423,7 +4608,7 @@ async def _smoke_live(start: float) -> dict[str, Any]:
             )
         )
     else:
-        cases.append(_case("zhipu search", True, {"skipped": "ZHIPU_API_KEY not configured"}))
+        cases.append(_skipped_case("zhipu search", "ZHIPU_API_KEY not configured"))
 
     context7_status = doctor_result.get("context7_connection_test", {})
     if config.context7_api_key:
@@ -4442,24 +4627,29 @@ async def _smoke_live(start: float) -> dict[str, Any]:
             )
         )
     else:
-        cases.append(_case("context7 library", True, {"skipped": "CONTEXT7_API_KEY not configured"}))
+        cases.append(_skipped_case("context7 library", "CONTEXT7_API_KEY not configured"))
 
-    if config.tavily_api_key or config.firecrawl_api_key:
+    if config.tavily_api_key and not config.tavily_enabled:
+        cases.append(_skipped_case("tavily", "TAVILY_ENABLED=false"))
+
+    enabled_fetch_providers = capability_status.get("web_fetch", {}).get("configured", [])
+    if enabled_fetch_providers:
         fetch_result = await fetch("https://example.com")
         cases.append(_case("web fetch fallback chain", bool(fetch_result.get("ok")), {"provider": fetch_result.get("provider", ""), "provider_attempts": fetch_result.get("provider_attempts", [])}))
     else:
-        cases.append(_case("web fetch fallback chain", True, {"skipped": "no fetch providers configured"}))
+        cases.append(_skipped_case("web fetch fallback chain", "no enabled web_fetch provider configured"))
 
-    failed = [c["name"] for c in cases if _case_failed(c)]
-    degraded = [c["name"] for c in cases if not c.get("ok") and c.get("severity") == "degraded"]
+    failed, degraded, skipped, status = _smoke_case_summary(cases)
     attempts: list[dict] = []
     for c in cases:
         attempts.extend(c.get("provider_attempts", []))
     return {
-        "ok": not failed,
+        "ok": status != "failed",
         "mode": "live",
+        "status": status,
         "failed_cases": failed,
         "degraded_cases": degraded,
+        "skipped_cases": skipped,
         "cases": cases,
         "provider_attempts": attempts,
         "elapsed_ms": _elapsed_ms(start),
