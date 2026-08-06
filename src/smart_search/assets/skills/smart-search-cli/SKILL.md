@@ -1,11 +1,20 @@
 ---
 name: smart-search-cli
-description: "CLI-first web research and source retrieval through the local smart-search command. Use when Codex needs current web search, source-backed fact checking, URL fetching, site mapping, official/API/documentation search, deep research, or reproducible search evidence via Skill + CLI instead of MCP tools or native web search."
+description: "Instructions for AI agents to use the local smart-search CLI for current web search, source-backed fact checking, URL fetching, site mapping, official/API/documentation search, deep research, and reproducible evidence instead of MCP tools or native web search."
 ---
 
 # Smart Search CLI
 
 Use the local `smart-search` command as the default execution layer for web research. This entrypoint keeps only routing, boundaries, and reference selection; load the focused reference file when command details or provider contracts matter.
+
+## What This Skill Is
+
+`smart-search-cli` is an instruction bundle for an AI tool. It explains when to call the local `smart-search` executable, which command fits the user's intent, how to preserve source evidence, and how to interpret provider status and fallback fields.
+
+- The Skill does not provide search access by itself; the configured `smart-search` CLI and its providers do the work.
+- The Skill is not an MCP server, does not store provider API keys, and does not create Trellis, hooks, agents, or commands.
+- `smart-search setup --install-skills ...` is the first-install path. After a CLI upgrade, use `skills status` for a read-only check and `skills update` to refresh only the managed Skill files.
+- Skill updates do not change provider configuration or API keys. Missing optional keys remain skipped rather than being treated as successful live checks.
 
 ## Default Workflow
 
