@@ -49,13 +49,13 @@ CodeStable 的 accept 规则要求：draft requirement 不能在 acceptance 阶�
 
 ## Options
 
-1. **批准该 req delta（推荐）**  
+1. **批准该 req delta（推荐）**
    继续 acceptance：机械更新 requirement/VISION，然后重跑 final audit，产出 passed acceptance。
 
-2. **不批准升级 requirement**  
+2. **不批准升级 requirement**
    保留代码和 QA 结果，但 acceptance 保持 blocked；后续不能把本 feature 宣告完整闭环。
 
-3. **要求改能力边界**  
+3. **要求改能力边界**
    这属于范围变更，需要回到 `cs-feat-design` 或 `cs-req` 重新收敛。
 
 ## Recommendation
