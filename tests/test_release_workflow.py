@@ -141,7 +141,7 @@ def test_ci_workflow_is_no_publish_and_covers_the_release_runtime_matrix():
     assert isinstance(workflow, dict)
     events = read_workflow_events(workflow_text)
     assert set(events) == {"pull_request", "push", "workflow_dispatch"}
-    assert events["push"] == {"branches": ["main"]}
+    assert events["push"] == {"branches": ["main", "codex/release-*"]}
     assert workflow["permissions"] == {"contents": "read"}
     assert "npm publish" not in workflow_text
     assert "id-token: write" not in workflow_text

@@ -687,7 +687,9 @@ Regression and release contracts:
   `git diff --check HEAD^1 HEAD`, with `git diff-tree --check --root -r
   --no-commit-id HEAD` as the root-commit fallback; a bare `git diff --check`
   after checkout only checks an empty worktree. It must not publish or request
-  npm provenance credentials.
+  npm provenance credentials. Push CI must also match `codex/release-*` so a
+  newly introduced workflow can validate its release branch before the
+  workflow first reaches the default branch.
 - Tarball smoke must assert that `npm pack --json` contains only the assets
   declared by package metadata, then run the installed wrapper's version,
   packaged regression fallback, and mock smoke without modifying a global npm
